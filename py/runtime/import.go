@@ -17,6 +17,13 @@ func (ip *Interp) loadModule(name string) *object.Module {
 	if m, ok := ip.Modules[name]; ok {
 		return m
 	}
+	// 宿主注入的模块（如跨语言桥的 zuzo）：全局作用域已有同名 Module 时直接复用
+	if v, ok := ip.Globals.GetLocal(name); ok {
+		if m, isMod := v.(*object.Module); isMod {
+			ip.Modules[name] = m
+			return m
+		}
+	}
 	if init, ok := builtinModuleInits[name]; ok {
 		m := init(ip)
 		ip.Modules[name] = m

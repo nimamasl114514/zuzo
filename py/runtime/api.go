@@ -240,6 +240,9 @@ func RunFile(path string, stdout, stderr interface{}) int {
 	return RunSource(string(data), path, out, errw)
 }
 
+// InteropHook 解释器创建后的互操作钩子（由宿主注入 zuzo 桥等）
+var InteropHook func(*Interp)
+
 // RunSource 运行源码，返回退出码
 func RunSource(src, filename string, stdout, stderr interface{ Write([]byte) (int, error) }) int {
 	m, errs := ParseSourceWithFile(src, filename)
@@ -254,6 +257,9 @@ func RunSource(src, filename string, stdout, stderr interface{ Write([]byte) (in
 	ip.Stdout = writerAdapter{stdout}
 	ip.Stderr = writerAdapter{stderr}
 	ip.SetMainFile(filename)
+	if InteropHook != nil {
+		InteropHook(ip)
+	}
 	exitCode := 0
 	func() {
 		defer func() {

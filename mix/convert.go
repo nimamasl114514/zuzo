@@ -7,6 +7,7 @@ import (
 	"zuzo/evaluator"
 	"zuzo/object"
 	pyobj "zuzo/py/object"
+	pyparser "zuzo/py/parser"
 	pyrt "zuzo/py/runtime"
 )
 
@@ -194,4 +195,53 @@ func (b *Bridge) LookupPy(name string) (pyobj.Object, bool) {
 // LookupZuzo 按名在 zuzo 全局环境中查找对象
 func (b *Bridge) LookupZuzo(name string) (object.Object, bool) {
 	return b.Env.Get(name)
+}
+
+// EvalPyExpr 在 Python 全局作用域求值一个表达式并返回结果（跨语言便捷通道）
+func (b *Bridge) EvalPyExpr(src string) (pyobj.Object, error) {
+	expr, errs := pyparser.ParseExpr(src)
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("%s", errs[0])
+	}
+	var out pyobj.Object = pyobj.None
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if pe, ok := r.(*pyrt.PyError); ok {
+					out = nil
+					err = fmt.Errorf("%s", pe.Error())
+				} else {
+					out = nil
+					err = fmt.Errorf("%v", r)
+				}
+			}
+		}()
+		out = b.IP.EvalExprPublic(expr, b.IP.Globals)
+	}()
+	return out, err
+}
+
+// ExecPy 在 Python 全局作用域执行一段代码（跨语言便捷通道）
+func (b *Bridge) ExecPy(src string) error {
+	mod, errs := pyparser.Parse(src)
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", errs[0])
+	}
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if pe, ok := r.(*pyrt.PyError); ok {
+					err = fmt.Errorf("%s", pe.Error())
+				} else {
+					err = fmt.Errorf("%v", r)
+				}
+			}
+		}()
+		if pe := b.IP.RunModule(mod); pe != nil {
+			err = fmt.Errorf("%s", pe.Error())
+		}
+	}()
+	return err
 }

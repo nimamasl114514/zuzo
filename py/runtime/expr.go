@@ -735,3 +735,8 @@ func extractDoc(stmts []ast.Stmt) string {
 }
 
 var _ = fmt.Sprintf
+
+// EvalExprPublic 对外暴露表达式求值（供跨语言桥使用：在指定作用域求一个已解析表达式）
+func (ip *Interp) EvalExprPublic(e ast.Expr, env *object.Env) object.Object {
+	return ip.evalExpr(e, env)
+}

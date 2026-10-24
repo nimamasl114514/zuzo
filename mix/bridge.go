@@ -44,6 +44,9 @@ func NewBridge(ip *pyrt.Interp, env *object.Environment, out, errw io.Writer) *B
 }
 
 // install 注入两侧入口
+// Install 对外暴露桥安装（纯 .hy / 纯 .py 模式复用同一套双向通道）
+func (b *Bridge) Install() { b.install() }
+
 func (b *Bridge) install() {
 	// ---------- zuzo 侧 ----------
 	b.defineZuzo("py调用", func(args ...object.Object) object.Object {
@@ -106,6 +109,35 @@ func (b *Bridge) install() {
 		}
 		_, ok = b.LookupPy(name.Value)
 		return &object.Boolean{Value: ok}
+	})
+
+	b.defineZuzo("py求值", func(args ...object.Object) object.Object {
+		if len(args) < 1 {
+			return errObj("E900", "py求值 需要 1 个参数（Python 表达式）")
+		}
+		code, ok := args[0].(*object.String)
+		if !ok {
+			return errObj("E900", "py求值 的参数必须是字符串")
+		}
+		res, err := b.EvalPyExpr(code.Value)
+		if err != nil {
+			return errObj("E903", err.Error())
+		}
+		return b.ToZuzo(res)
+	})
+
+	b.defineZuzo("py执行", func(args ...object.Object) object.Object {
+		if len(args) < 1 {
+			return errObj("E900", "py执行 需要 1 个参数（Python 代码）")
+		}
+		code, ok := args[0].(*object.String)
+		if !ok {
+			return errObj("E900", "py执行 的参数必须是字符串")
+		}
+		if err := b.ExecPy(code.Value); err != nil {
+			return errObj("E904", err.Error())
+		}
+		return evaluator.NULL
 	})
 
 	// ---------- Python 侧 ----------

@@ -33,6 +33,7 @@ var moduleManager *evaluator.ModuleManager
 
 func main() {
 	startCPUProfile()
+	initInterop()
 	args := os.Args[1:]
 
 	if len(args) == 0 {
@@ -240,6 +241,7 @@ func runCode(source string, noSAP, shadow, shadowLenient, strict bool) {
 		evaluator.SetSAPCompiler(nil)
 		env := evaluator.NewEnvironment()
 		evaluator.SetDebugEnv(env)
+		installCrossBridge(env, os.Stdout, os.Stderr)
 		result := evaluator.Eval(program, env)
 		handleResult(result, source)
 		stopCPUProfile()
@@ -253,6 +255,7 @@ func runCode(source string, noSAP, shadow, shadowLenient, strict bool) {
 	evaluator.SetSAPCompiler(sap)
 	env := evaluator.NewSAPEnvironment(len(slotMap), slotMap)
 	evaluator.SetDebugEnv(env)
+	installCrossBridge(env, os.Stdout, os.Stderr)
 	result := evaluator.Eval(program, env)
 	handleResult(result, source)
 	stopCPUProfile()
