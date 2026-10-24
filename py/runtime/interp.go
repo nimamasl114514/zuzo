@@ -129,8 +129,12 @@ func (ip *Interp) IndexErr(format string, a ...interface{}) {
 }
 
 // KeyErr 键错误
+//
+// CPython 语义：KeyError.args = (key,)，str() 时才对 key 取 repr。
+// 这里必须传原始对象，否则会在 Str() 的 KeyError 特例里二次 repr（出现 "'missing'" 双层引号）。
 func (ip *Interp) KeyErr(key object.Object) {
-	ip.raise(ip.excType("KeyError"), "%s", key.Repr())
+	exc := object.NewException(ip.excType("KeyError"), key)
+	ip.RaiseObj(exc)
 }
 
 // AttrErr 属性错误
@@ -577,7 +581,13 @@ func (ip *Interp) execRaise(node *ast.Raise, env *object.Env) {
 	if node.Cause != nil {
 		cv := ip.evalExpr(node.Cause, env)
 		if ce, ok := cv.(*object.Exception); ok {
-			exc.Cause = ce
+			// raise X from Y：显式因果链，同时抑制隐式上下文（CPython 语义）
+			exc.SetCause(ce)
+			exc.SetSuppressContext(true)
+		} else if cv == object.None {
+			// raise X from None：显式声明「不展示隐式上下文」
+			exc.SetCause(nil)
+			exc.SetSuppressContext(true)
 		}
 	}
 	ip.RaiseObj(exc)

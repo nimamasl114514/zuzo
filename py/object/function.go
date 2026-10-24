@@ -105,6 +105,10 @@ func (e *Exception) Str() string {
 		return ""
 	}
 	if len(e.Args) == 1 {
+		// CPython：KeyError 的单参数按 repr 呈现（str(KeyError("host")) == "'host'"）
+		if e.Class != nil && e.Class.Name == "KeyError" {
+			return e.Args[0].Repr()
+		}
 		return e.Args[0].Str()
 	}
 	return newTuple(e.Args).Str()

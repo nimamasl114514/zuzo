@@ -736,11 +736,27 @@ func (p *Parser) parseFString(tok token.Token) ast.Expr {
 			if len(rest) > 0 && rest[0] == ':' {
 				format = string(rest[1:])
 			}
+			// 自文档 f-string：{expr=} / {expr=!r} / {expr=:spec}
+			// CPython 语义：输出「源码原文=」再接值；未指定转换/格式时默认用 repr
+			debugText := ""
+			if strings.HasSuffix(exprSrc, "=") &&
+				!strings.HasSuffix(exprSrc, "==") && !strings.HasSuffix(exprSrc, "!=") &&
+				!strings.HasSuffix(exprSrc, "<=") && !strings.HasSuffix(exprSrc, ">=") &&
+				!strings.HasSuffix(exprSrc, ":=") {
+				debugText = exprSrc
+				exprSrc = strings.TrimSpace(strings.TrimSuffix(exprSrc, "="))
+				if conv == 0 && format == "" {
+					conv = 'r'
+				}
+			}
 			sub, errs := ParseExpr(exprSrc)
 			if len(errs) > 0 {
 				for _, e := range errs {
 					p.errs = append(p.errs, "f-string 内表达式错误: "+e)
 				}
+			}
+			if debugText != "" {
+				parts = append(parts, ast.FStringPart{Literal: debugText, IsLiteral: true})
 			}
 			parts = append(parts, ast.FStringPart{Expr: sub, Format: format, Conversion: conv})
 			i = j + 1
