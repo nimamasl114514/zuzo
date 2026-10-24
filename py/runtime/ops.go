@@ -967,8 +967,12 @@ func (ip *Interp) FormatValue(v object.Object, spec string) string {
 		idx++
 	}
 	comma := false
+	underscore := false
 	if idx < len(s) && s[idx] == ',' {
 		comma = true
+		idx++
+	} else if idx < len(s) && s[idx] == '_' {
+		underscore = true
 		idx++
 	}
 	prec := -1
@@ -1020,6 +1024,8 @@ func (ip *Interp) FormatValue(v object.Object, spec string) string {
 		}
 		if comma {
 			body = addThousands(body)
+		} else if underscore {
+			body = addUnderscores(body)
 		}
 		if sign == '+' && n >= 0 {
 			body = "+" + body
@@ -1054,6 +1060,8 @@ func (ip *Interp) FormatValue(v object.Object, spec string) string {
 		}
 		if comma {
 			body = addThousands(body)
+		} else if underscore {
+			body = addUnderscores(body)
 		}
 		if sign == '+' && f >= 0 {
 			body = "+" + body
@@ -1113,6 +1121,11 @@ func maxInt(a, b int) int {
 		return b
 	}
 	return a
+}
+
+// addUnderscores 与 addThousands 同构，但用下划线分组（CPython 的 `_` 千分位）
+func addUnderscores(s string) string {
+	return strings.ReplaceAll(addThousands(s), ",", "_")
 }
 
 func addThousands(s string) string {
