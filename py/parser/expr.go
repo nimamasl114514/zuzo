@@ -447,7 +447,7 @@ func (p *Parser) parseAtom() ast.Expr {
 			return e
 		}
 		first := p.parseTestListNoTuple()
-		if p.at(token.KW_FOR) {
+		if p.at(token.KW_FOR) || p.at(token.KW_ASYNC) {
 			// 生成器表达式
 			gens := p.parseCompClauses()
 			p.expect(token.RPAREN)
@@ -473,7 +473,7 @@ func (p *Parser) parseAtom() ast.Expr {
 			return &ast.List{Pos: ast.Pos{L: line}}
 		}
 		first := p.parseTestListNoTuple()
-		if p.at(token.KW_FOR) {
+		if p.at(token.KW_FOR) || p.at(token.KW_ASYNC) {
 			gens := p.parseCompClauses()
 			p.expect(token.RBRACKET)
 			return &ast.ListComp{Pos: ast.Pos{L: line}, Elt: first, Gens: gens}
@@ -540,7 +540,7 @@ func (p *Parser) parseBrace() ast.Expr {
 	if p.at(token.COLON) {
 		p.next()
 		val := p.parseTestListNoTuple()
-		if p.at(token.KW_FOR) {
+		if p.at(token.KW_FOR) || p.at(token.KW_ASYNC) {
 			gens := p.parseCompClauses()
 			p.expect(token.RBRACE)
 			return &ast.DictComp{Pos: ast.Pos{L: line}, Key: first, Value: val, Gens: gens}
@@ -565,7 +565,7 @@ func (p *Parser) parseBrace() ast.Expr {
 		p.expect(token.RBRACE)
 		return &ast.Dict{Pos: ast.Pos{L: line}, Keys: keys, Values: vals}
 	}
-	if p.at(token.KW_FOR) {
+	if p.at(token.KW_FOR) || p.at(token.KW_ASYNC) {
 		gens := p.parseCompClauses()
 		p.expect(token.RBRACE)
 		return &ast.SetComp{Pos: ast.Pos{L: line}, Elt: first, Gens: gens}

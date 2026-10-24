@@ -106,7 +106,7 @@ print(总)
 go test ./...         # Go 单测（含原生循环、SAP、混合切块）
 ```
 
-当前状态：`run_tests` 25/33 通过（7 个为运行时能力缺口，见 `docs/dev-status.md`）、`run_tests_mix` 15/15、`go test` 全绿。
+当前状态：`run_tests` 29/33 通过（3 个为运行时能力缺口，见 `docs/dev-status.md`）、`run_tests_mix` 15/15、`go test` 全绿。
 
 ## 文档
 

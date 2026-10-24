@@ -29,6 +29,98 @@ func (f *Function) Type() *TypeObj { return funcType }
 func (f *Function) Repr() string   { return "<function " + f.Name + ">" }
 func (f *Function) Str() string    { return f.Repr() }
 
+// DictRef 返回函数属性字典（惰性创建，保证 f.memo = {} 后读写一致）
+func (f *Function) DictRef() *Dict {
+	if f.Dict == nil {
+		f.Dict = &Dict{}
+	}
+	return f.Dict
+}
+
+// GetAttr 读取用户自定义属性（functools.wraps 等写入的元信息也走这里）
+func (f *Function) GetAttr(name string) (Object, bool) {
+	if f.Dict == nil {
+		return nil, false
+	}
+	return f.Dict.Get(&Str{V: name})
+}
+
+// SetAttr 写入函数属性；元信息类属性同步到结构体字段，保证 Repr/回溯用名一致
+func (f *Function) SetAttr(name string, v Object) {
+	d := f.DictRef()
+	if name == "__name__" {
+		d.Delete(&Str{V: name})
+		if s, ok := v.(*Str); ok {
+			f.Name = s.V
+			return
+		}
+	}
+	if name == "__qualname__" {
+		if s, ok := v.(*Str); ok {
+			f.QualName = s.V
+		}
+	}
+	if name == "__doc__" {
+		if s, ok := v.(*Str); ok {
+			f.Doc = s.V
+		} else {
+			f.Doc = ""
+		}
+	}
+	d.Set(&Str{V: name}, v)
+}
+
+// UpdateWrapper 实现 functools.update_wrapper 的核心语义：
+// 把 wrapped 的 __module__/__name__/__qualname__/__doc__ 与 __dict__ 复制到 wrapper，
+// 并写入 __wrapped__ 反向引用。
+func UpdateWrapper(wrapper, wrapped Object) {
+	if wrapper == nil || wrapped == nil {
+		return
+	}
+	target, isFn := wrapper.(*Function)
+	if !isFn {
+		return
+	}
+	if src, ok := wrapped.(*Function); ok {
+		target.SetAttr("__module__", &Str{V: src.Module})
+		target.SetAttr("__name__", &Str{V: src.Name})
+		q := src.QualName
+		if q == "" {
+			q = src.Name
+		}
+		target.SetAttr("__qualname__", &Str{V: q})
+		if src.Doc == "" {
+			target.SetAttr("__doc__", None)
+		} else {
+			target.SetAttr("__doc__", &Str{V: src.Doc})
+		}
+		if src.Dict != nil {
+			d := target.DictRef()
+			for i, k := range src.Dict.Keys {
+				d.Set(k, src.Dict.Vals[i])
+			}
+		}
+	}
+	target.SetAttr("__wrapped__", wrapped)
+}
+
+// NewWrapsBuiltin 构造 functools.wraps 的内置实现
+func NewWrapsBuiltin() *Builtin {
+	return &Builtin{Name: "wraps", Fn: func(args []Object, kw map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return None, nil
+		}
+		wrapped := args[0]
+		return &Builtin{Name: "decorator", Fn: func(a []Object, k map[string]Object) (Object, error) {
+			if len(a) < 1 {
+				return None, nil
+			}
+			UpdateWrapper(a[0], wrapped)
+			return a[0], nil
+		}}, nil
+	}}
+}
+
 // BuiltinFn 内置函数实现
 type BuiltinFn func(args []Object, kwargs map[string]Object) (Object, error)
 

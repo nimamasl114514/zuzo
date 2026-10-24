@@ -1555,11 +1555,8 @@ func modFunctools(ip *Interp) *object.Module {
 			return ip.Call(fn, all, k), nil
 		}), nil
 	})
-	m.Dict["wraps"] = bi("wraps", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		return bi("decorator", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-			return a[0], nil
-		}), nil
-	})
+	// wraps 需真实复制元信息（__name__/__qualname__/__doc__/__dict__），否则 wrapper 名字与 CPython 不一致
+	m.Dict["wraps"] = object.NewWrapsBuiltin()
 	m.Dict["lru_cache"] = bi("lru_cache", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		var target object.Object
 		if len(args) > 0 && (isCallableObj(args[0])) {
@@ -1913,7 +1910,9 @@ func (ip *Interp) spawnTask(coro object.Object, name string) *object.Task {
 
 func modTyping(ip *Interp) *object.Module {
 	m := newModule("typing")
-	for _, n := range []string{"List", "Dict", "Tuple", "Set", "Optional", "Any", "Union", "Callable", "Iterable", "Iterator", "Sequence", "Mapping", "Type", "NamedTuple", "TYPE_CHECKING"} {
+	for _, n := range []string{"List", "Dict", "Tuple", "Set", "Optional", "Any", "Union", "Callable", "Iterable", "Iterator", "Sequence", "Mapping", "Type", "NamedTuple", "TYPE_CHECKING",
+		// 泛型与结构类型：作为可继承的空类型存在（下标泛型由 __class_getitem__ 兜底）
+		"Generic", "TypeVar", "TypedDict", "Protocol", "Literal", "Final", "ClassVar", "NoReturn", "TypeAlias"} {
 		m.Dict[n] = &object.TypeObj{Name: n, Dict: map[string]object.Object{}}
 	}
 	return m

@@ -137,6 +137,10 @@ func (ip *Interp) GetAttr(o object.Object, name string) object.Object {
 		}
 		ip.AttrErr(o, name)
 	case *object.Function:
+		// 自定义属性优先：functools.wraps 写入的 __name__/__doc__/__wrapped__ 等会覆盖内置只读视图
+		if val, ok := v.GetAttr(name); ok {
+			return val
+		}
 		switch name {
 		case "__name__":
 			return &object.Str{V: v.Name}
@@ -156,20 +160,13 @@ func (ip *Interp) GetAttr(o object.Object, name string) object.Object {
 		case "__module__":
 			return &object.Str{V: v.Module}
 		case "__dict__":
-			if v.Dict == nil {
-				return &object.Dict{}
-			}
-			return v.Dict
+			// 返回函数自身的属性字典（活引用，支持 f.__dict__['x'] = 1）
+			return v.DictRef()
 		case "__defaults__":
 			if len(v.ArgDefaults) == 0 {
 				return object.None
 			}
 			return &object.Tuple{Items: v.ArgDefaults}
-		}
-		if v.Dict != nil {
-			if val, ok := v.Dict.Get(&object.Str{V: name}); ok {
-				return val
-			}
 		}
 		ip.AttrErr(o, name)
 	case *object.Builtin:
@@ -339,6 +336,10 @@ func (ip *Interp) SetAttr(o object.Object, name string, v object.Object) {
 		return
 	case *object.Exception:
 		obj.Dict[name] = v
+		return
+	case *object.Function:
+		// 函数对象支持任意属性（f.memo = {}、装饰器给 wrapper 挂属性）
+		obj.SetAttr(name, v)
 		return
 	}
 	if inst, ok := o.(*object.Instance); ok {

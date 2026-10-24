@@ -6,22 +6,20 @@
 
 | 套件 | 结果 | 说明 |
 |---|---|---|
-| `run_tests.sh`（Python 对拍） | **25 / 33 通过** | 7 个失败为运行时能力缺口（见 §二），1 个 helper 跳过 |
+| `run_tests.sh`（Python 对拍） | **29 / 33 通过** | 3 个失败为运行时能力缺口（见 §二），1 个 helper 跳过 |
 | `run_tests_mix.sh`（混合 golden） | **15 / 15 通过** | 切块、类型桥、调用桥、作用域同步 |
 | `go test ./...` | **全绿** | `ast` / `mix` / `tests` 三包（含原生循环、SAP、De Bruijn 基准） |
 | `gofmt -l .` | 干净 | CI 强制 |
 
-## 二、7 个失败用例与根因
+## 二、3 个失败用例与根因（2026-10-24 第10轮后）
 
 | 用例 | 缺失能力 | 位置 |
 |---|---|---|
-| `t23_walrus` | `re.finditer` 未实现 | `py/runtime/stdlib*.go` |
-| `t24_decorator_args` | 带参装饰器的参数绑定边界 | `py/runtime/call.go` |
-| `t25_fstring_nested` | f-string 自文档 `{x=}` 与嵌套格式 | `py/runtime/expr.go` |
-| `t26_raisefrom` | 异常链 `__cause__` / `__context__` 未建模 | `py/object` 异常对象 |
-| `t27_with_multi` | 多上下文 `with a() as x, b() as y` 的 `__enter__` 链 | `py/runtime/interp.go` |
-| `t29_async` | `For.IsAsync` / `With.IsAsync` 字段声明后从未被读取（async 退化为同步） | `py/ast/ast.go:88,183` |
-| `t30_annotations` | `AnnAssign` 注解表达式不求值；类 `__annotations__` 值统一填 `"annotation"` | `py/runtime/interp.go:236`、`expr.go:495` |
+| `t25_fstring_nested` | 动态格式说明符 `{v:{'>'}{10}}` 与嵌套格式未支持 | `py/runtime/ops.go` FormatValue |
+| `t29_async` | `asyncio.Queue` 未实现（async for/with 已支持） | `py/runtime/stdlib.go` modAsyncio |
+| `t30_annotations` | `__annotations__` 只部分求值（TypedDict/泛型标注未完整落地） | `py/runtime/interp.go` AnnAssign |
+
+> 已转绿（本轮修复）：`t07_exception`（KeyError 呈现口径）、`t23_walrus`（re.finditer + 推导式作用域）、`t24_decorator_args`（函数属性 + functools.wraps）、`t26_raisefrom`（异常链 `__cause__`）、`t27_with_multi`（contextlib）。
 
 ## 三、已确认的结构性缺口
 
