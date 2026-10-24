@@ -2,6 +2,8 @@
 
 中文编程语言 + 内嵌 Python 运行时 + 混合语言执行器，纯 Go 实现，单二进制交付。
 
+> 平台：当前主要在 **Windows x64** 开发与验证（CFFI 加载路径与浏览器内置依赖 Windows API）；Linux/macOS 移植见 [开发状态](docs/dev-status.md)。
+
 > **English summary**
 > zuzo is a Chinese-syntax programming language implemented in pure Go. It ships a five-tier
 > execution pipeline (tree-walking → SAP closures → native int64 loops → Smi-tagged values →
