@@ -1,0 +1,23 @@
+# 统一换行：文本文件一律以 LF 检出（gofmt 与 CI 才能稳定判定）
+* text=auto eol=lf
+
+*.go      text eol=lf
+*.md      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.json    text eol=lf
+*.sh      text eol=lf
+*.py      text eol=lf
+*.hy      text eol=lf
+*.hypy    text eol=lf
+*.wat     text eol=lf
+
+# Windows 脚本保持 CRLF
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# 二进制
+*.png     binary
+*.exe     binary
+*.wasm    binary
+*.class   binary
