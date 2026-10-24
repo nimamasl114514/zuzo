@@ -419,10 +419,47 @@ func (p *Parser) parseAtom() ast.Expr {
 		for p.at(token.STRING) {
 			val += p.next().Literal
 		}
+		// 普通串后面紧跟 f-string：合并成 FString（PEP 隐式拼接）
+		if p.at(token.FSTRING) {
+			parts := []ast.FStringPart{{Literal: val, IsLiteral: true}}
+			for p.at(token.FSTRING) || p.at(token.STRING) {
+				nt := p.cur()
+				p.next()
+				if nt.Type == token.FSTRING {
+					if sub, ok := p.parseFString(nt).(*ast.FString); ok {
+						parts = append(parts, sub.Parts...)
+					}
+				} else {
+					parts = append(parts, ast.FStringPart{Literal: nt.Literal, IsLiteral: true})
+				}
+			}
+			return &ast.FString{Pos: ast.Pos{L: line}, Parts: parts}
+		}
 		return &ast.String{Pos: ast.Pos{L: line}, Value: val, IsBytes: isBytes}
 	case token.FSTRING:
 		p.next()
-		return p.parseFString(t)
+		e := p.parseFString(t)
+		// 相邻 f-string / 字符串隐式拼接（f"a" f"b" → f"ab"）
+		if p.at(token.FSTRING) || p.at(token.STRING) {
+			fs, ok := e.(*ast.FString)
+			if !ok {
+				return e
+			}
+			parts := append([]ast.FStringPart{}, fs.Parts...)
+			for p.at(token.FSTRING) || p.at(token.STRING) {
+				nt := p.cur()
+				p.next()
+				if nt.Type == token.FSTRING {
+					if sub, ok := p.parseFString(nt).(*ast.FString); ok {
+						parts = append(parts, sub.Parts...)
+					}
+				} else {
+					parts = append(parts, ast.FStringPart{Literal: nt.Literal, IsLiteral: true})
+				}
+			}
+			return &ast.FString{Pos: fs.Pos, Parts: parts}
+		}
+		return e
 	case token.KW_TRUE:
 		p.next()
 		return &ast.Name{Pos: ast.Pos{L: line}, Id: "True"}

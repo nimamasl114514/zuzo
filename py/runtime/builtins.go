@@ -83,6 +83,32 @@ func (ip *Interp) initExceptions() {
 	mk("BufferError", exc)
 	mk("ReferenceError", exc)
 	mk("UnicodeTranslateError", ip.ExcTypes["UnicodeError"])
+	// 警告体系（warnings.py / 三方库高频使用）
+	warn := mk("Warning", exc)
+	mk("UserWarning", warn)
+	mk("DeprecationWarning", warn)
+	mk("PendingDeprecationWarning", warn)
+	mk("SyntaxWarning", warn)
+	mk("RuntimeWarning", warn)
+	mk("FutureWarning", warn)
+	mk("ImportWarning", warn)
+	mk("UnicodeWarning", warn)
+	mk("BytesWarning", warn)
+	mk("ResourceWarning", warn)
+	mk("EncodingWarning", warn)
+	// 其余常用内建异常（三方库 except 分支引用）
+	mk("EnvironmentError", ip.ExcTypes["OSError"])
+	mk("BlockingIOError", ip.ExcTypes["OSError"])
+	mk("ChildProcessError", ip.ExcTypes["OSError"])
+	mk("BrokenPipeError", ip.ExcTypes["OSError"])
+	mk("ConnectionAbortedError", ip.ExcTypes["OSError"])
+	mk("ConnectionRefusedError", ip.ExcTypes["OSError"])
+	mk("ConnectionResetError", ip.ExcTypes["OSError"])
+	mk("InterruptedError", ip.ExcTypes["OSError"])
+	mk("ProcessLookupError", ip.ExcTypes["OSError"])
+	mk("EOFError", exc)
+	mk("ExceptionGroup", exc)
+	mk("BaseExceptionGroup", base)
 	// BaseException 的 MRO 需要包含自身
 	base.Dict["__init__"] = &object.Builtin{Name: "__init__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
 		if len(args) > 0 {
@@ -104,7 +130,113 @@ func (ip *Interp) initExceptions() {
 		return &object.Str{V: args[0].Str()}, nil
 	}}
 	ObjectType := object.ObjectType
+	// object.__init__ / __new__ 是 CPython types.py 的基石：
+	// WrapperDescriptorType = type(object.__init__)，缺了它整个 types.py 起不来。
+	if _, ok := ObjectType.Dict["__init__"]; !ok {
+		ObjectType.Dict["__init__"] = &object.Builtin{Name: "__init__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+			return object.None, nil
+		}}
+	}
+	if _, ok := ObjectType.Dict["__str__"]; !ok {
+		ObjectType.Dict["__str__"] = &object.Builtin{Name: "__str__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+			// CPython 语义：object.__str__ 转调实例自己的 __repr__
+			if len(args) > 0 {
+				if inst, ok := args[0].(*object.Instance); ok {
+					if m, found := ip.findDunder(inst.Class, "__repr__"); found {
+						r := ip.Call(ip.bindMethod(inst, m), nil, nil)
+						if sv, ok := r.(*object.Str); ok {
+							return sv, nil
+						}
+					}
+				}
+				return &object.Str{V: args[0].Str()}, nil
+			}
+			return &object.Str{V: ""}, nil
+		}}
+	}
+	if _, ok := ObjectType.Dict["__repr__"]; !ok {
+		ObjectType.Dict["__repr__"] = &object.Builtin{Name: "__repr__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+			if len(args) > 0 {
+				return &object.Str{V: args[0].Repr()}, nil
+			}
+			return &object.Str{V: ""}, nil
+		}}
+	}
+	if _, ok := ObjectType.Dict["__hash__"]; !ok {
+		ObjectType.Dict["__hash__"] = &object.Builtin{Name: "__hash__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+			if len(args) > 0 {
+				return &object.Int{V: 0}, nil
+			}
+			return &object.Int{V: 0}, nil
+		}}
+	}
+	if _, ok := ObjectType.Dict["__eq__"]; !ok {
+		ObjectType.Dict["__eq__"] = &object.Builtin{Name: "__eq__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+			if len(args) > 1 {
+				return &object.Bool{V: object.Equal(args[0], args[1])}, nil
+			}
+			return object.None, nil
+		}}
+	}
+	if _, ok := ObjectType.Dict["__new__"]; !ok {
+		ObjectType.Dict["__new__"] = &object.Builtin{Name: "__new__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+			if len(args) > 0 {
+				return args[0], nil
+			}
+			return object.None, nil
+		}}
+	}
 	ip.Builtins.Set("object", ObjectType)
+	// types.py: GetSetDescriptorType = type(FunctionType.__code__)
+	// FunctionType 是 TypeObj（type(func) 的结果），需要在类上能取到 __code__ 描述符
+	// type.__new__(mcls, name, bases, ns) —— 元类链路的地基：
+	// EnumType / ABCMeta / 各种自定义 metaclass 都会走 super().__new__(...) 建类。
+	if object.TypeType.Dict == nil {
+		object.TypeType.Dict = map[string]object.Object{}
+	}
+	object.TypeType.Dict["__new__"] = &object.Builtin{Name: "__new__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+		if len(args) < 4 {
+			ip.TypeError("type.__new__() takes at least 4 arguments")
+		}
+		mcls, _ := args[0].(*object.TypeObj)
+		name := args[1].Str()
+		cls := &object.TypeObj{Name: name, Dict: map[string]object.Object{}, MetaClass: mcls}
+		for _, b := range ip.ToSlice(args[2]) {
+			if bt, ok := b.(*object.TypeObj); ok {
+				cls.Bases = append(cls.Bases, bt)
+				if bt.IsExc {
+					cls.IsExc = true
+				}
+			}
+		}
+		if len(cls.Bases) == 0 {
+			cls.Bases = []*object.TypeObj{object.ObjectType}
+		}
+		switch ns := args[3].(type) {
+		case *object.Dict:
+			for i, k := range ns.Keys {
+				cls.Dict[k.Str()] = ns.Vals[i]
+			}
+		case *object.Instance:
+			for k, v := range ns.Dict {
+				cls.Dict[k] = v
+			}
+		}
+		return cls, nil
+	}}
+	if object.FuncType.Dict == nil {
+		object.FuncType.Dict = map[string]object.Object{}
+	}
+	if _, ok := object.FuncType.Dict["__code__"]; !ok {
+		object.FuncType.Dict["__code__"] = &object.Builtin{Name: "__code__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+			return object.None, nil
+		}}
+	}
+	if _, ok := object.FuncType.Dict["__globals__"]; !ok {
+		object.FuncType.Dict["__globals__"] = &object.Builtin{Name: "__globals__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+			return &object.Dict{}, nil
+		}}
+	}
 	ip.ExcTypes["__object__"] = ObjectType
 }
 

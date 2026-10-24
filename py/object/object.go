@@ -21,6 +21,7 @@ type Object interface {
 type TypeObj struct {
 	Name    string
 	Bases   []*TypeObj
+	MetaClass *TypeObj // 元类（class X(metaclass=M) 时记录 M；nil = type）
 	Dict    map[string]Object
 	mro     []*TypeObj
 	IsExc   bool // 是否异常类型
@@ -89,7 +90,12 @@ var (
 )
 
 // Type 类型对象自身
-func (t *TypeObj) Type() *TypeObj { return typeType }
+func (t *TypeObj) Type() *TypeObj {
+	if t.MetaClass != nil {
+		return t.MetaClass
+	}
+	return typeType
+}
 func (t *TypeObj) Repr() string   { return "<class '" + t.Name + "'>" }
 func (t *TypeObj) Str() string    { return t.Repr() }
 

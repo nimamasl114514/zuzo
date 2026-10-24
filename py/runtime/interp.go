@@ -18,7 +18,13 @@ type Interp struct {
 	Globals    *object.Env // 全局作用域
 	Builtins   *object.Env // 内置作用域
 	Modules    map[string]*object.Module
-	SysPath    []string
+	SysPath    []string        // sys.path 的镜像（兼容读点）
+	SysPathList *object.List   // sys.path 真身：Python 侧 append/insert 立即生效
+	SysModules  *object.Dict   // sys.modules 视图（与 Modules map 同步）
+	stdlibDir   string         // CPython Lib 目录（标准库纯 py 兜底，永远排最后）
+	ExitFuncs   []object.Object // atexit 注册的回调（逆序执行）
+	pathMu     sync.Mutex
+	pathProbed bool            // 惰性探测是否已跑过（一次性）
 	Stdout     io.Writer
 	Stderr     io.Writer
 	Cwd        string
@@ -55,7 +61,27 @@ func (e *PyError) Error() string {
 	if e.Exc == nil {
 		return "<nil exception>"
 	}
-	return e.Exc.Class.Name + ": " + e.Exc.Str()
+	msg := e.Exc.Class.Name + ": " + e.Exc.Str()
+	if e.File != "" || e.Line > 0 {
+		loc := e.File
+		if i := strings.LastIndexAny(loc, "/\\"); i >= 0 {
+			loc = loc[i+1:]
+		}
+		if e.Line > 0 {
+			msg += fmt.Sprintf(" (%s:%d)", loc, e.Line)
+		} else {
+			msg += " (" + loc + ")"
+		}
+	}
+	// 附带最近 3 帧（文件 + 行号），否则第三方库报错无法定位到具体源码行
+	if n := len(e.Frames); n > 0 {
+		m := n
+		if m > 3 {
+			m = 3
+		}
+		msg += " @ " + strings.Join(e.Frames[n-m:], " | ")
+	}
+	return msg
 }
 
 // New 创建解释器
@@ -67,13 +93,14 @@ func New() *Interp {
 		MaxDepth: 4000,
 		ExcTypes: map[string]*object.TypeObj{},
 	}
+	ip.SysModules = &object.Dict{}
 	ip.Builtins = object.NewGlobalEnv()
 	ip.Globals = object.NewEnv(ip.Builtins)
 	ip.Globals.Globals = ip.Globals
 	ip.Builtins.Globals = ip.Globals
 	cwd, _ := os.Getwd()
 	ip.Cwd = cwd
-	ip.SysPath = []string{ip.Cwd, "."}
+	ip.initSysPath()
 	registerBuiltins(ip)
 	registerBuiltinModules(ip)
 	return ip
@@ -777,7 +804,13 @@ func (ip *Interp) SetMainFile(path string) {
 	ip.MainFile = path
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
-		ip.SysPath = append([]string{dir}, ip.SysPath...)
+		// 主文件所在目录要排在最前（同目录模块可 import）；
+		// 注意必须改活列表 SysPathList —— 只改 SysPath 镜像会被 sysPathDirs 覆盖。
+		if ip.SysPathList != nil {
+			ip.addSysPathDirFront(dir)
+		} else {
+			ip.SysPath = append([]string{dir}, ip.SysPath...)
+		}
 	}
 }
 

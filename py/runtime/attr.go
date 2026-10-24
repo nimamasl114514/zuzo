@@ -69,7 +69,7 @@ func (ip *Interp) GetAttr(o object.Object, name string) object.Object {
 		case "__name__":
 			return &object.Str{V: v.Name}
 		case "__class__":
-			return object.TypeType
+			return v.Type()
 		case "__bases__":
 			items := make([]object.Object, len(v.Bases))
 			for i, b := range v.Bases {
@@ -161,6 +161,14 @@ func (ip *Interp) GetAttr(o object.Object, name string) object.Object {
 			return &object.Str{V: v.Doc}
 		case "__class__":
 			return object.FuncType
+		case "__code__":
+			return ip.newCodeObj(v)
+		case "__closure__":
+			// CPython 的 types.py 用 `(lambda x: lambda: x)(0).__closure__[0]` 取 cell 类型；
+			// 返回 None 会让它 `[0]` 直接 TypeError（enum / email / urllib3 全链断在这里）。
+			return &object.Tuple{Items: []object.Object{newCellObj()}}
+		case "__globals__":
+			return &object.Dict{}
 		case "__module__":
 			return &object.Str{V: v.Module}
 		case "__dict__":
@@ -183,6 +191,15 @@ func (ip *Interp) GetAttr(o object.Object, name string) object.Object {
 			return object.None
 		}
 		ip.AttrErr(o, name)
+	case *object.Range:
+		switch name {
+		case "start":
+			return &object.Int{V: v.Start}
+		case "stop":
+			return &object.Int{V: v.Stop}
+		case "step":
+			return &object.Int{V: v.Step}
+		}
 	case *object.Generator:
 		switch name {
 		case "__name__":
@@ -209,6 +226,12 @@ func (ip *Interp) GetAttr(o object.Object, name string) object.Object {
 			return ip.bindClassAttr(v.Class, v, m)
 		}
 		switch name {
+		case "__traceback__":
+			// CPython types.py 用 `raise TypeError` + `exc.__traceback__.tb_frame` 取 FrameType；
+			// 返回 None 会让它 .tb_frame 直接挂，整个 types.py 起不来。
+			return ip.newTracebackObj()
+		case "__cause__", "__context__", "__suppress_context__":
+			return object.None
 		case "args":
 			return &object.Tuple{Items: v.Args}
 		case "__class__":
@@ -482,6 +505,11 @@ func (ip *Interp) sliceRange(sl *object.Slice, n int) (start, stop, step int) {
 
 // GetItem 下标取值
 func (ip *Interp) GetItem(o object.Object, idx object.Object) object.Object {
+	// PEP 585：类型对象下标 → 泛型别名（list[int] / dict[str, int]）
+	// CPython types.py 首行就有 `GenericAlias = type(list[int])`，不支持则整个 types.py 起不来。
+	if t, ok := o.(*object.TypeObj); ok {
+		return ip.makeGenericAlias(t, idx)
+	}
 	switch v := o.(type) {
 	case *object.Str:
 		rs := []rune(v.V)

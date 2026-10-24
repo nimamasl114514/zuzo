@@ -57,13 +57,84 @@ func traceParser(name, filename string) {
 //
 // 这些场景下自带 parser 是正确的，故按「源码特征」整文件回退，保证语义零偏差。
 func needsBuiltinParserGuard(src string) bool {
-	if strings.ContainsRune(src, '\\') {
-		return true
-	}
 	if strings.Contains(src, "except*") || strings.Contains(src, "async for") {
 		return true
 	}
-	return hasLongIntLiteral(src)
+	if hasLongIntLiteral(src) {
+		return true
+	}
+	return hasUnsupportedEscape(src)
+}
+
+// hasUnsupportedEscape 扫描字符串字面量里的 Python 转义，找出 gopapy 不解码的那几类。
+//
+// gopapy 只解码 \n \t \r \\ \' \" \0，其余原样保留；而 Python 里
+// \a \b \f \v \ooo \xhh \N{...} \uxxxx \Uxxxxxxxx 都有真实语义，
+// 保留原样 = 字符串内容错 —— 这些文件必须回退自带 parser。
+// 正则里常见的 \d \s \w \. 等「未知转义」Python 也原样保留，所以不回退。
+// （2026-10-25 第13轮：原实现「含 \ 就整文件回退」会把几乎所有标准库源码
+//   推进自带 parser，实测 warnings.py 首次搭车就 SyntaxError，故改为精确扫描。）
+func hasUnsupportedEscape(src string) bool {
+	i, n := 0, len(src)
+	for i < n {
+		c := src[i]
+		if c == '#' {
+			for i < n && src[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if c != '\'' && c != '"' {
+			i++
+			continue
+		}
+		raw := false
+		if i > 0 {
+			p := src[i-1]
+			if p == 'r' || p == 'R' {
+				raw = true
+			}
+		}
+		quote := c
+		i++
+		triple := false
+		if i+1 < n && src[i] == quote && src[i+1] == quote {
+			triple = true
+			i += 2
+		}
+		for i < n {
+			ch := src[i]
+			if ch == '\\' && i+1 < n {
+				if raw {
+					i += 2
+					continue
+				}
+				switch src[i+1] {
+				case 'a', 'b', 'f', 'v', 'x', 'u', 'U', 'N', '1', '2', '3', '4', '5', '6', '7':
+					return true
+				}
+				i += 2
+				continue
+			}
+			if ch == quote {
+				if triple {
+					if i+2 < n && src[i+1] == quote && src[i+2] == quote {
+						i += 3
+						break
+					}
+					i++
+					continue
+				}
+				i++
+				break
+			}
+			if ch == '\n' && !triple {
+				break
+			}
+			i++
+		}
+	}
+	return false
 }
 
 // hasLongIntLiteral 扫连续数字串，超过 int64 安全位数（19 位）即认为需要自带 parser

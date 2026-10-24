@@ -404,7 +404,27 @@ func registerMethods(ip *Interp) {
 		return &object.Str{V: sign + strings.Repeat("0", int(w)-n) + s}, nil
 	})
 	regMethod(object.StrType, "encode", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		return &object.Bytes{V: []byte(selfStr(args).V)}, nil
+		s := selfStr(args).V
+		enc, errMode := "utf-8", "strict"
+		if len(args) > 1 {
+			enc = args[1].Str()
+		}
+		if len(args) > 2 {
+			errMode = args[2].Str()
+		}
+		if kw != nil {
+			if v, ok := kw["encoding"]; ok {
+				enc = v.Str()
+			}
+			if v, ok := kw["errors"]; ok {
+				errMode = v.Str()
+			}
+		}
+		out, err := codecEncode(s, enc, errMode)
+		if err != nil {
+			ip.raise(ip.excType("UnicodeEncodeError"), "%v", err)
+		}
+		return &object.Bytes{V: out}, nil
 	})
 	regMethod(object.StrType, "format", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		s := selfStr(args).V
@@ -952,7 +972,26 @@ func registerMethods(ip *Interp) {
 	// ---------------- bytes ----------------
 	regMethod(object.BytesType, "decode", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		b := args[0].(*object.Bytes)
-		return &object.Str{V: string(b.V)}, nil
+		enc, errMode := "utf-8", "strict"
+		if len(args) > 1 {
+			enc = args[1].Str()
+		}
+		if len(args) > 2 {
+			errMode = args[2].Str()
+		}
+		if kw != nil {
+			if v, ok := kw["encoding"]; ok {
+				enc = v.Str()
+			}
+			if v, ok := kw["errors"]; ok {
+				errMode = v.Str()
+			}
+		}
+		s, err := codecDecode(b.V, enc, errMode)
+		if err != nil {
+			ip.raise(ip.excType("UnicodeDecodeError"), "%v", err)
+		}
+		return &object.Str{V: s}, nil
 	})
 	regMethod(object.BytesType, "hex", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		b := args[0].(*object.Bytes)

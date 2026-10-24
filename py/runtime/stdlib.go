@@ -44,6 +44,7 @@ func registerBuiltinModules(ip *Interp) {
 	builtinModuleInits["asyncio"] = modAsyncio
 	registerStdlib2(ip)
 	registerStdlib4(ip)
+	registerStdlibPatch(ip)
 }
 
 // newModule 创建模块
@@ -1078,13 +1079,32 @@ func modSys(ip *Interp) *object.Module {
 		}
 		panic(&exitSignal{code: code})
 	})
-	m.Dict["path"] = func() object.Object {
-		items := make([]object.Object, len(ip.SysPath))
-		for i, p := range ip.SysPath {
-			items[i] = &object.Str{V: p}
-		}
-		return &object.List{Items: items}
-	}()
+	if ip.SysPathList == nil {
+		ip.initSysPath()
+	}
+	// path 与 modules 都必须是「活对象」：Python 侧 append / 赋值立即生效
+	m.Dict["path"] = ip.SysPathList
+	if ip.SysModules == nil {
+		ip.SysModules = &object.Dict{}
+	}
+	m.Dict["modules"] = ip.SysModules
+	m.Dict["version_info"] = &object.Tuple{Items: []object.Object{
+		&object.Int{V: 3}, &object.Int{V: 11}, &object.Int{V: 0},
+		&object.Str{V: "final"}, &object.Int{V: 0},
+	}}
+	m.Dict["hexversion"] = &object.Int{V: 0x030b00f0}
+	m.Dict["byteorder"] = &object.Str{V: "little"}
+	m.Dict["prefix"] = &object.Str{V: ip.Cwd}
+	m.Dict["base_prefix"] = &object.Str{V: ip.Cwd}
+	m.Dict["executable"] = &object.Str{V: "zuzo"}
+	m.Dict["dont_write_bytecode"] = &object.Bool{V: true}
+	m.Dict["warnoptions"] = &object.List{}
+	m.Dict["argv"] = &object.List{Items: []object.Object{&object.Str{V: ip.MainFile}}}
+	m.Dict["flags"] = &object.Instance{Class: &object.TypeObj{Name: "flags", Dict: map[string]object.Object{}}, Dict: map[string]object.Object{}}
+	impl := &object.Instance{Class: &object.TypeObj{Name: "Namespace", Dict: map[string]object.Object{}}, Dict: map[string]object.Object{}}
+	impl.Dict["name"] = &object.Str{V: "zuzo"}
+	impl.Dict["cache_tag"] = &object.Str{V: "zuzo-311"}
+	m.Dict["implementation"] = impl
 	m.Dict["getrecursionlimit"] = bi("getrecursionlimit", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		return &object.Int{V: int64(ip.MaxDepth)}, nil
 	})

@@ -272,7 +272,7 @@ func (p *Parser) parseFor(isAsync bool) ast.Stmt {
 	p.next() // for
 	target := p.parseTargetList()
 	p.expect(token.KW_IN)
-	iter := p.parseTestListNoTuple()
+	iter := p.parseTestList() // Python 允许 for x in a, b:（无括号元组）
 	body := p.parseSuite()
 	var orelse []ast.Stmt
 	if p.at(token.KW_ELSE) {

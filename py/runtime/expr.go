@@ -475,20 +475,56 @@ func (ip *Interp) makeClass(node *ast.ClassDef, env *object.Env) *object.TypeObj
 	cls := &object.TypeObj{Name: node.Name, Dict: map[string]object.Object{}}
 	for _, b := range node.Bases {
 		bv := ip.evalExpr(b, env)
-		if bt, ok := bv.(*object.TypeObj); ok {
+		if bt, ok := ip.asBaseType(bv); ok {
 			cls.Bases = append(cls.Bases, bt)
 			if bt.IsExc {
 				cls.IsExc = true
 			}
 		} else {
-			ip.TypeError("class bases must be types")
+			ip.TypeError("class bases must be types (base #%d is %s: %s)", len(cls.Bases), object.TypeName(bv), bv.Repr())
 		}
 	}
+	// rawBases = 源码里写的基类（可能为空）；传给 metaclass 的 __prepare__ / __new__
+	// 必须是原样，不能补 object —— CPython 的 enum 就靠 `if not bases` 走默认分支。
+	rawBases := append([]*object.TypeObj{}, cls.Bases...)
 	if len(cls.Bases) == 0 {
 		if cls.IsExc {
 			cls.Bases = []*object.TypeObj{ip.excType("Exception")}
 		} else {
 			cls.Bases = []*object.TypeObj{object.ObjectType}
+		}
+	}
+	// 元类：class X(metaclass=M) —— 先求 metaclass，再走 __prepare__（CPython 语义）
+	var mcls *object.TypeObj
+	for _, kw := range node.Keywords {
+		if kw.Name == "metaclass" {
+			if t, ok := ip.evalExpr(kw.Value, env).(*object.TypeObj); ok {
+				mcls = t
+			}
+		}
+	}
+	// 无显式 metaclass 时从基类继承（CPython：metaclass = type(bases[0])）
+	if mcls == nil {
+		for _, b := range cls.Bases {
+			if b.MetaClass != nil {
+				mcls = b.MetaClass
+				break
+			}
+		}
+	}
+	var classDictObj object.Object
+	if mcls != nil && mcls != object.TypeType {
+		if prep, ok := ip.findDunder(mcls, "__prepare__"); ok {
+			var basesItems []object.Object
+			for _, b := range rawBases {
+				basesItems = append(basesItems, b)
+			}
+			fn := ip.GetAttr(mcls, "__prepare__")
+			if _, isBuiltin := fn.(*object.NoneObj); !isBuiltin {
+				classDictObj = ip.Call(fn, []object.Object{&object.Str{V: node.Name}, &object.Tuple{Items: basesItems}}, nil)
+			} else {
+				_ = prep
+			}
 		}
 	}
 	// 类体在独立作用域执行
@@ -500,6 +536,21 @@ func (ip *Interp) makeClass(node *ast.ClassDef, env *object.Env) *object.TypeObj
 	for k, v := range classEnv.Vars {
 		cls.Dict[k] = v
 	}
+	// 类体写入 metaclass 提供的 classdict（_EnumDict 等自定义映射）
+	if classDictObj != nil {
+		for k, v := range classEnv.Vars {
+			switch target := classDictObj.(type) {
+			case *object.Instance:
+				if m, ok := ip.findDunder(target.Class, "__setitem__"); ok {
+					ip.Call(ip.bindMethod(target, m), []object.Object{&object.Str{V: k}, v}, nil)
+					continue
+				}
+				target.Dict[k] = v
+			case *object.Dict:
+				target.Set(&object.Str{V: k}, v)
+			}
+		}
+	}
 	if len(classEnv.ClassAnnotations) > 0 {
 		ann := &object.Dict{}
 		for _, name := range classEnv.ClassAnnotations {
@@ -507,28 +558,41 @@ func (ip *Interp) makeClass(node *ast.ClassDef, env *object.Env) *object.TypeObj
 		}
 		cls.Dict["__annotations__"] = ann
 	}
-	// 元类：class X(metaclass=M) → 调用 M.__new__(M, name, bases, ns)
-	var mcls *object.TypeObj
-	for _, kw := range node.Keywords {
-		if kw.Name == "metaclass" {
-			if t, ok := ip.evalExpr(kw.Value, env).(*object.TypeObj); ok {
-				mcls = t
-			}
-		}
-	}
+	// 元类：调用 M.__new__(M, name, bases, classdict)
 	if mcls != nil && mcls != object.TypeType {
-		ns := &object.Dict{}
-		for k, v := range cls.Dict {
-			ns.Set(&object.Str{V: k}, v)
+		var ns object.Object = &object.Dict{}
+		if classDictObj != nil {
+			ns = classDictObj
+		} else {
+			d := &object.Dict{}
+			for k, v := range cls.Dict {
+				d.Set(&object.Str{V: k}, v)
+			}
+			ns = d
 		}
 		var basesItems []object.Object
-		for _, b := range cls.Bases {
+		for _, b := range rawBases {
 			basesItems = append(basesItems, b)
 		}
 		newFn := ip.GetAttr(mcls, "__new__")
 		res := ip.Call(newFn, []object.Object{mcls, &object.Str{V: node.Name}, &object.Tuple{Items: basesItems}, ns}, nil)
 		if t, ok := res.(*object.TypeObj); ok {
 			cls = t
+			if cls.MetaClass == nil {
+				cls.MetaClass = mcls
+			}
+		}
+	}
+	// __set_name__ 协议（PEP 487）：类创建后通知每个描述符自己的名字
+	// enum / dataclasses / 各种 ORM 都依赖它，缺了会让类的元数据静默丢失。
+	for name, v := range cls.Dict {
+		if name == "__set_name__" {
+			continue
+		}
+		if m, ok := ip.findDunder(typeOfAttr(v), "__set_name__"); ok {
+			ip.protect(func() {
+				ip.Call(ip.bindMethod(v, m), []object.Object{cls, &object.Str{V: name}}, nil)
+			})
 		}
 	}
 	// 类名绑定由调用方完成；装饰器在此应用
@@ -739,4 +803,48 @@ var _ = fmt.Sprintf
 // EvalExprPublic 对外暴露表达式求值（供跨语言桥使用：在指定作用域求一个已解析表达式）
 func (ip *Interp) EvalExprPublic(e ast.Expr, env *object.Env) object.Object {
 	return ip.evalExpr(e, env)
+}
+
+// typeOfAttr 取对象的类型对象（用于查 __set_name__）
+func typeOfAttr(v object.Object) *object.TypeObj {
+	switch x := v.(type) {
+	case *object.Instance:
+		return x.Class
+	case *object.TypeObj:
+		return x
+	case *object.Function:
+		return object.FuncType
+	case *object.Builtin:
+		return object.BuiltinType
+	case *object.ClassMethod:
+		return object.ClassMethodType
+	case *object.StaticMethod:
+		return object.StaticMethodType
+	case *object.Property:
+		return object.PropertyType
+	}
+	if t, ok := v.(interface{ Type() *object.TypeObj }); ok {
+		return t.Type()
+	}
+	return object.ObjectType
+}
+
+// asBaseType 把「基类表达式」归一为 TypeObj。
+// 标准库里有 `class abstractclassmethod(classmethod):` 这类继承内置装饰器类型的写法，
+// 而 zuzo 的 classmethod / staticmethod / property 首版注册成了内置函数，这里做映射。
+func (ip *Interp) asBaseType(v object.Object) (*object.TypeObj, bool) {
+	if t, ok := v.(*object.TypeObj); ok {
+		return t, true
+	}
+	if b, ok := v.(*object.Builtin); ok {
+		switch b.Name {
+		case "classmethod":
+			return object.ClassMethodType, true
+		case "staticmethod":
+			return object.StaticMethodType, true
+		case "property":
+			return object.PropertyType, true
+		}
+	}
+	return nil, false
 }

@@ -539,6 +539,16 @@ func (l *Lexer) scanStringBodyRaw(prefix string) (string, bool, error) {
 				return sb.String(), false, fmt.Errorf("单行字符串未闭合")
 			}
 		}
+		if c == '\\' && raw {
+			// raw 字符串：反斜杠原样保留，但「\ + 引号」不终止字符串（CPython 语义，
+			// 例 r"[\"']" 在整个正则/字符类里都合法）。此前未处理，导致
+			// charset_normalizer/constant.py 等文件被提前截断，报「非法字符 \\」。
+			sb.WriteRune(l.advance())
+			if !l.eof() {
+				sb.WriteRune(l.advance())
+			}
+			continue
+		}
 		if c == '\\' && !raw {
 			// f-string 内保留转义原文，交给拆分阶段处理
 			if isF {

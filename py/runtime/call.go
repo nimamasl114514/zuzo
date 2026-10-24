@@ -52,6 +52,12 @@ func (ip *Interp) Call(fn object.Object, args []object.Object, kwargs map[string
 	case *object.BoundMethod:
 		return ip.Call(f.Fn, append([]object.Object{f.Self}, args...), kwargs)
 	case *object.TypeObj:
+		// 元类自定义 __call__（enum 的 Color(1) / 各类工厂类）
+		if f.MetaClass != nil && f.MetaClass != object.TypeType {
+			if m, ok := ip.findDunder(f.MetaClass, "__call__"); ok {
+				return ip.Call(ip.bindMethod(f, m), args, kwargs)
+			}
+		}
 		return ip.instantiate(f, args, kwargs)
 	case *object.Instance:
 		if m, ok := ip.findDunder(f.Class, "__call__"); ok {

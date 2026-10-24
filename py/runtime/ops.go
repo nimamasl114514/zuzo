@@ -186,6 +186,14 @@ var rdunderNames = map[string]string{
 
 // BinOp 二元运算
 func (ip *Interp) BinOp(op string, a, b object.Object) object.Object {
+	// PEP 604：类型并集 int | str（types.py: UnionType = type(int | str)）
+	if op == "|" {
+		if _, ok := a.(*object.TypeObj); ok {
+			if _, ok2 := b.(*object.TypeObj); ok2 {
+				return ip.makeUnionType(a, b)
+			}
+		}
+	}
 	// 用户类型优先走 dunder
 	if inst, ok := a.(*object.Instance); ok {
 		if _, builtinLeft := a.(*object.Int); !builtinLeft {
