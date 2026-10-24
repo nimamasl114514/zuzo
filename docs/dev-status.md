@@ -6,7 +6,7 @@
 
 | 套件 | 结果 | 说明 |
 |---|---|---|
-| `run_tests.sh`（Python 对拍） | **29 / 33 通过** | 3 个失败为运行时能力缺口（见 §二），1 个 helper 跳过 |
+| `run_tests.sh`（Python 对拍） | **30 / 34 通过** | 3 个失败为运行时能力缺口（见 §二），1 个 helper 跳过 |
 | `run_tests_mix.sh`（混合 golden） | **15 / 15 通过** | 切块、类型桥、调用桥、作用域同步 |
 | `go test ./...` | **全绿** | `ast` / `mix` / `tests` 三包（含原生循环、SAP、De Bruijn 基准） |
 | `gofmt -l .` | 干净 | CI 强制 |
@@ -39,6 +39,8 @@
 - [ ] **P2** `Environment` 存储收敛（store / slots / valueSlots / slotMap / context 五份状态合并为「槽位唯一 + map 视图」）
 - [ ] **P3** 原生循环溢出预检
 - [ ] **P3** token Literal 惰性化（解析侧 GC 占 ~30%）
+- [x] **P2** Python 侧 ctypes 原生 FFI（不内嵌 CPython，见 `docs/ctypes.md`）
+- [ ] **P2** zuzo ↔ py 双向无缝调用（纯 .hy / 纯 .py 模式，目前仅 .hypy 混合模式支持）
 
 ## 五、如何复现状态
 

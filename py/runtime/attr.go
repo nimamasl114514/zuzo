@@ -30,6 +30,10 @@ func (ip *Interp) bindMethod(self object.Object, fn object.Object) object.Object
 
 // GetAttr 属性访问
 func (ip *Interp) GetAttr(o object.Object, name string) object.Object {
+	// ctypes 对象（CDLL / CFuncPtr / CValue）优先走原生 FFI 属性通道
+	if v, ok := ip.ctypesGetAttr(o, name); ok {
+		return v
+	}
 	switch v := o.(type) {
 	case *object.Instance:
 		// 1. 实例字典
@@ -304,6 +308,10 @@ func (ip *Interp) bindClassAttr(definedOn *object.TypeObj, self object.Object, a
 
 // SetAttr 属性赋值
 func (ip *Interp) SetAttr(o object.Object, name string, v object.Object) {
+	// ctypes 函数指针的 argtypes / restype 设置
+	if ctypesSetAttr(o, name, v) {
+		return
+	}
 	switch obj := o.(type) {
 	case *object.Instance:
 		// data descriptor 优先

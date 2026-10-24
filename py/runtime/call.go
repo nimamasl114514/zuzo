@@ -21,6 +21,16 @@ type genCtx struct {
 // Call 调用任意可调用对象
 func (ip *Interp) Call(fn object.Object, args []object.Object, kwargs map[string]object.Object) object.Object {
 	switch f := fn.(type) {
+	case *object.CFuncPtr:
+		if r, ok := ip.ctypesCall(f, args); ok {
+			return r
+		}
+	case *object.CTypeObj:
+		// ctypes 标量类型调用：c_int(5) → CValue
+		if len(args) == 0 {
+			return &object.CValue{Kind: f.Kind}
+		}
+		return toCValue(f.Kind, args[0])
 	case *object.Function:
 		return ip.callFunction(f, args, kwargs)
 	case *object.Builtin:
