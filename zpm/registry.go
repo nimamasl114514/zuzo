@@ -27,17 +27,17 @@ import (
 
 // RegistryEntry 注册表中一个包的元信息
 type RegistryEntry struct {
-	Name     string   `json:"name"`
-	Versions []string `json:"versions"`
-	Latest   string   `json:"latest"`
-	Source   string   `json:"source"` // Git URL
-	Description string `json:"description"`
+	Name        string   `json:"name"`
+	Versions    []string `json:"versions"`
+	Latest      string   `json:"latest"`
+	Source      string   `json:"source"` // Git URL
+	Description string   `json:"description"`
 }
 
 // Registry 本地注册表索引
 type Registry struct {
 	Packages map[string]*RegistryEntry `json:"packages"`
-	path     string                     // 索引文件路径
+	path     string                    // 索引文件路径
 }
 
 // DefaultRegistryDir 默认注册表目录 (~/.zuzo/registry/)

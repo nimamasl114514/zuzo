@@ -15,21 +15,21 @@ import (
 
 // Interp Python 解释器实例
 type Interp struct {
-	Globals  *object.Env // 全局作用域
-	Builtins *object.Env // 内置作用域
-	Modules  map[string]*object.Module
-	SysPath  []string
-	Stdout   io.Writer
-	Stderr   io.Writer
-	Cwd      string
-	MainFile string
-	Depth    int
-	MaxDepth int
-	Frames   []string
-	genStack []*genCtx
+	Globals    *object.Env // 全局作用域
+	Builtins   *object.Env // 内置作用域
+	Modules    map[string]*object.Module
+	SysPath    []string
+	Stdout     io.Writer
+	Stderr     io.Writer
+	Cwd        string
+	MainFile   string
+	Depth      int
+	MaxDepth   int
+	Frames     []string
+	genStack   []*genCtx
 	currentEnv *object.Env
 	kwOrder    []string // 最近一次调用的关键字参数顺序
-	ExcTypes map[string]*object.TypeObj
+	ExcTypes   map[string]*object.TypeObj
 	// numCache 数字字面量解析结果缓存（key = AST 节点指针）。
 	// 循环条件/常量在热路径上每轮都会求值，重复 ParseInt 是主要开销之一；
 	// 用 sync.Map 因为 threading/asyncio 模块会在 goroutine 中并发求值。

@@ -22,24 +22,24 @@ import (
 
 // 质数表：为不同的 AST 节点类型和运算符分配质数
 var (
-	primeLiteralInt uint64 = 13 // 整数字面量
-	primeLiteralFlt uint64 = 17 // 浮点字面量
-	primeLiteralStr uint64 = 19 // 字符串字面量
-	primeLiteralBl  uint64 = 23 // 布尔字面量
-	primeNull       uint64 = 29 // 空值
-	primeDefault    uint64 = 41 // 未匹配节点的默认质数
-	primeError      uint64 = 43 // 错误占位节点
-	primeFString    uint64 = 47 // f-字符串
-	primeArray      uint64 = 53 // 数组（有序，非交换）
-	primeHash       uint64 = 59 // 哈希表（无序，交换律）
-	primeIf         uint64 = 61 // 如果表达式
-	primeFunc       uint64 = 67 // 函数字面量
-	primeCall       uint64 = 71 // 函数调用
-	primeIndex      uint64 = 73 // 索引访问
-	primeAssign     uint64 = 79 // 赋值
-	primeImport     uint64 = 83 // 导入语句
-	primeBreak      uint64 = 89 // 跳出语句
-	primeContinue   uint64 = 97 // 跳过语句
+	primeLiteralInt uint64 = 13  // 整数字面量
+	primeLiteralFlt uint64 = 17  // 浮点字面量
+	primeLiteralStr uint64 = 19  // 字符串字面量
+	primeLiteralBl  uint64 = 23  // 布尔字面量
+	primeNull       uint64 = 29  // 空值
+	primeDefault    uint64 = 41  // 未匹配节点的默认质数
+	primeError      uint64 = 43  // 错误占位节点
+	primeFString    uint64 = 47  // f-字符串
+	primeArray      uint64 = 53  // 数组（有序，非交换）
+	primeHash       uint64 = 59  // 哈希表（无序，交换律）
+	primeIf         uint64 = 61  // 如果表达式
+	primeFunc       uint64 = 67  // 函数字面量
+	primeCall       uint64 = 71  // 函数调用
+	primeIndex      uint64 = 73  // 索引访问
+	primeAssign     uint64 = 79  // 赋值
+	primeImport     uint64 = 83  // 导入语句
+	primeBreak      uint64 = 89  // 跳出语句
+	primeContinue   uint64 = 97  // 跳过语句
 	primeTryCatch   uint64 = 101 // 执行/遇到语句
 	primeDefine     uint64 = 103 // 定义语句
 )
@@ -88,9 +88,10 @@ var commutativeOps = map[string]bool{
 
 // fingerprintCtx 指纹计算上下文。
 // 使用两遍扫描：
-//   第一遍：collectVars 收集子树中所有唯一变量名
-//   规范排序后分配不同质数（第一个变量→varPrimeTable[0]，第二个→[1]...）
-//   第二遍：compute 使用分配的质数计算指纹
+//
+//	第一遍：collectVars 收集子树中所有唯一变量名
+//	规范排序后分配不同质数（第一个变量→varPrimeTable[0]，第二个→[1]...）
+//	第二遍：compute 使用分配的质数计算指纹
 //
 // 这样 x-y 与 a-b 指纹相同（命名无关），
 // 但 x-y 与 y-x 指纹不同（非交换律保护）。

@@ -49,7 +49,7 @@ func makePrefix(op string, right Expression) *PrefixExpression {
 	return &PrefixExpression{
 		Token:    token.Token{Type: token.TokenType(op), Literal: op},
 		Operator: op,
-		Right:     right,
+		Right:    right,
 	}
 }
 

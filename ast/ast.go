@@ -52,14 +52,14 @@ func (p *Program) String() string {
 // 为 nil 时表示无注解
 // ParsedType 是注解对应的 Type（通过 infer.ParseTypeAnnotation 解析）
 type LetStatement struct {
-	Token token.Token // 变量
-	Name  *Identifier
-	TypeAnnot string   // 类型注解文本（如 "整数"），为空表示无注解
-	Value Expression
+	Token     token.Token // 变量
+	Name      *Identifier
+	TypeAnnot string // 类型注解文本（如 "整数"），为空表示无注解
+	Value     Expression
 }
 
 func (ls *LetStatement) statementNode()       {}
-func (ls *LetStatement) TokenLiteral() string  { return ls.Token.Literal }
+func (ls *LetStatement) TokenLiteral() string { return ls.Token.Literal }
 func (ls *LetStatement) String() string {
 	var buf bytes.Buffer
 	buf.WriteString(ls.TokenLiteral() + " ")
@@ -79,7 +79,7 @@ type ReturnStatement struct {
 }
 
 func (rs *ReturnStatement) statementNode()       {}
-func (rs *ReturnStatement) TokenLiteral() string  { return rs.Token.Literal }
+func (rs *ReturnStatement) TokenLiteral() string { return rs.Token.Literal }
 func (rs *ReturnStatement) String() string {
 	var buf bytes.Buffer
 	buf.WriteString(rs.TokenLiteral() + " ")
@@ -97,7 +97,7 @@ type ExpressionStatement struct {
 }
 
 func (es *ExpressionStatement) statementNode()       {}
-func (es *ExpressionStatement) TokenLiteral() string  { return es.Token.Literal }
+func (es *ExpressionStatement) TokenLiteral() string { return es.Token.Literal }
 func (es *ExpressionStatement) String() string {
 	if es.Expression != nil {
 		return es.Expression.String() + ";"
@@ -107,13 +107,13 @@ func (es *ExpressionStatement) String() string {
 
 // WhileStatement 当循环: 当 条件 { 循环体 }
 type WhileStatement struct {
-	Token      token.Token // 当
-	Condition  Expression
-	Body       *BlockStatement
+	Token     token.Token // 当
+	Condition Expression
+	Body      *BlockStatement
 }
 
 func (ws *WhileStatement) statementNode()       {}
-func (ws *WhileStatement) TokenLiteral() string  { return ws.Token.Literal }
+func (ws *WhileStatement) TokenLiteral() string { return ws.Token.Literal }
 func (ws *WhileStatement) String() string {
 	var buf bytes.Buffer
 	buf.WriteString(ws.TokenLiteral() + " ")
@@ -132,7 +132,7 @@ type ForStatement struct {
 }
 
 func (fs *ForStatement) statementNode()       {}
-func (fs *ForStatement) TokenLiteral() string  { return fs.Token.Literal }
+func (fs *ForStatement) TokenLiteral() string { return fs.Token.Literal }
 func (fs *ForStatement) String() string {
 	var buf bytes.Buffer
 	buf.WriteString(fs.TokenLiteral() + " ")
@@ -159,7 +159,7 @@ type ImportStatement struct {
 }
 
 func (is *ImportStatement) statementNode()       {}
-func (is *ImportStatement) TokenLiteral() string  { return is.Token.Literal }
+func (is *ImportStatement) TokenLiteral() string { return is.Token.Literal }
 func (is *ImportStatement) String() string {
 	s := "导入 \"" + is.Path + "\""
 	if is.Alias != "" {
@@ -175,7 +175,7 @@ type BlockStatement struct {
 }
 
 func (bs *BlockStatement) statementNode()       {}
-func (bs *BlockStatement) TokenLiteral() string  { return bs.Token.Literal }
+func (bs *BlockStatement) TokenLiteral() string { return bs.Token.Literal }
 func (bs *BlockStatement) String() string {
 	var buf bytes.Buffer
 	buf.WriteString("{ ")
@@ -191,14 +191,14 @@ func (bs *BlockStatement) String() string {
 // Identifier 标识符
 // 支持可选的类型注解: 参数名: 类型
 type Identifier struct {
-	Token token.Token
-	Value string
+	Token     token.Token
+	Value     string
 	TypeAnnot string // 参数类型注解文本，为空表示无注解
 }
 
 func (i *Identifier) expressionNode()      {}
-func (i *Identifier) TokenLiteral() string  { return i.Token.Literal }
-func (i *Identifier) String() string        { return i.Value }
+func (i *Identifier) TokenLiteral() string { return i.Token.Literal }
+func (i *Identifier) String() string       { return i.Value }
 
 // IntegerLiteral 整数字面量
 type IntegerLiteral struct {
@@ -207,8 +207,8 @@ type IntegerLiteral struct {
 }
 
 func (il *IntegerLiteral) expressionNode()      {}
-func (il *IntegerLiteral) TokenLiteral() string  { return il.Token.Literal }
-func (il *IntegerLiteral) String() string        { return il.Token.Literal }
+func (il *IntegerLiteral) TokenLiteral() string { return il.Token.Literal }
+func (il *IntegerLiteral) String() string       { return il.Token.Literal }
 
 // FloatLiteral 浮点数字面量
 type FloatLiteral struct {
@@ -217,8 +217,8 @@ type FloatLiteral struct {
 }
 
 func (fl *FloatLiteral) expressionNode()      {}
-func (fl *FloatLiteral) TokenLiteral() string  { return fl.Token.Literal }
-func (fl *FloatLiteral) String() string        { return fl.Token.Literal }
+func (fl *FloatLiteral) TokenLiteral() string { return fl.Token.Literal }
+func (fl *FloatLiteral) String() string       { return fl.Token.Literal }
 
 // StringLiteral 字符串字面量
 type StringLiteral struct {
@@ -227,8 +227,8 @@ type StringLiteral struct {
 }
 
 func (sl *StringLiteral) expressionNode()      {}
-func (sl *StringLiteral) TokenLiteral() string  { return sl.Token.Literal }
-func (sl *StringLiteral) String() string        { return `"` + sl.Value + `"` }
+func (sl *StringLiteral) TokenLiteral() string { return sl.Token.Literal }
+func (sl *StringLiteral) String() string       { return `"` + sl.Value + `"` }
 
 // FStringLiteral f-字符串字面量: f"Hello {name}, count={count}"
 // Parts 是交替的字面量字符串和插值表达式
@@ -239,7 +239,7 @@ type FStringLiteral struct {
 }
 
 func (fsl *FStringLiteral) expressionNode()      {}
-func (fsl *FStringLiteral) TokenLiteral() string  { return fsl.Token.Literal }
+func (fsl *FStringLiteral) TokenLiteral() string { return fsl.Token.Literal }
 func (fsl *FStringLiteral) String() string {
 	var buf bytes.Buffer
 	buf.WriteString("f\"")
@@ -257,8 +257,8 @@ type BooleanLiteral struct {
 }
 
 func (bl *BooleanLiteral) expressionNode()      {}
-func (bl *BooleanLiteral) TokenLiteral() string  { return bl.Token.Literal }
-func (bl *BooleanLiteral) String() string        { return bl.Token.Literal }
+func (bl *BooleanLiteral) TokenLiteral() string { return bl.Token.Literal }
+func (bl *BooleanLiteral) String() string       { return bl.Token.Literal }
 
 // NullLiteral 空值: 空
 type NullLiteral struct {
@@ -266,18 +266,18 @@ type NullLiteral struct {
 }
 
 func (nl *NullLiteral) expressionNode()      {}
-func (nl *NullLiteral) TokenLiteral() string  { return nl.Token.Literal }
-func (nl *NullLiteral) String() string        { return nl.Token.Literal }
+func (nl *NullLiteral) TokenLiteral() string { return nl.Token.Literal }
+func (nl *NullLiteral) String() string       { return nl.Token.Literal }
 
 // PrefixExpression 前缀表达式: -x, !x, 非x
 type PrefixExpression struct {
-	Token     token.Token // 前缀运算符
-	Operator  string
-	Right     Expression
+	Token    token.Token // 前缀运算符
+	Operator string
+	Right    Expression
 }
 
 func (pe *PrefixExpression) expressionNode()      {}
-func (pe *PrefixExpression) TokenLiteral() string  { return pe.Token.Literal }
+func (pe *PrefixExpression) TokenLiteral() string { return pe.Token.Literal }
 func (pe *PrefixExpression) String() string {
 	return "(" + pe.Operator + pe.Right.String() + ")"
 }
@@ -291,7 +291,7 @@ type InfixExpression struct {
 }
 
 func (ie *InfixExpression) expressionNode()      {}
-func (ie *InfixExpression) TokenLiteral() string  { return ie.Token.Literal }
+func (ie *InfixExpression) TokenLiteral() string { return ie.Token.Literal }
 func (ie *InfixExpression) String() string {
 	return "(" + ie.Left.String() + " " + ie.Operator + " " + ie.Right.String() + ")"
 }
@@ -299,13 +299,13 @@ func (ie *InfixExpression) String() string {
 // AssignExpression 赋值表达式: x = 值 或 数组[i] = 值
 type AssignExpression struct {
 	Token       token.Token
-	Name        *Identifier       // 简单变量赋值（为 nil 时表示索引赋值）
-	IndexTarget *IndexExpression  // 数组/哈希元素赋值
+	Name        *Identifier      // 简单变量赋值（为 nil 时表示索引赋值）
+	IndexTarget *IndexExpression // 数组/哈希元素赋值
 	Value       Expression
 }
 
 func (ae *AssignExpression) expressionNode()      {}
-func (ae *AssignExpression) TokenLiteral() string  { return ae.Token.Literal }
+func (ae *AssignExpression) TokenLiteral() string { return ae.Token.Literal }
 func (ae *AssignExpression) String() string {
 	return ae.Name.String() + " = " + ae.Value.String()
 }
@@ -319,7 +319,7 @@ type IfExpression struct {
 }
 
 func (ie *IfExpression) expressionNode()      {}
-func (ie *IfExpression) TokenLiteral() string  { return ie.Token.Literal }
+func (ie *IfExpression) TokenLiteral() string { return ie.Token.Literal }
 func (ie *IfExpression) String() string {
 	var buf bytes.Buffer
 	buf.WriteString("如果 " + ie.Condition.String() + " " + ie.Consequence.String())
@@ -332,15 +332,15 @@ func (ie *IfExpression) String() string {
 // FunctionLiteral 函数: 函数 名称(参数) { 函数体 }
 // 支持可选的返回类型注解: 函数 名称(参数) -> 整数 { 函数体 }
 type FunctionLiteral struct {
-	Token      token.Token // 函数
-	Name       string
-	Parameters []*Identifier
-	RetTypeAnnot string       // 返回类型注解文本，为空表示无注解
-	Body       *BlockStatement
+	Token        token.Token // 函数
+	Name         string
+	Parameters   []*Identifier
+	RetTypeAnnot string // 返回类型注解文本，为空表示无注解
+	Body         *BlockStatement
 }
 
 func (fl *FunctionLiteral) expressionNode()      {}
-func (fl *FunctionLiteral) TokenLiteral() string  { return fl.Token.Literal }
+func (fl *FunctionLiteral) TokenLiteral() string { return fl.Token.Literal }
 func (fl *FunctionLiteral) String() string {
 	var params []string
 	for _, p := range fl.Parameters {
@@ -358,7 +358,7 @@ type CallExpression struct {
 }
 
 func (ce *CallExpression) expressionNode()      {}
-func (ce *CallExpression) TokenLiteral() string  { return ce.Token.Literal }
+func (ce *CallExpression) TokenLiteral() string { return ce.Token.Literal }
 func (ce *CallExpression) String() string {
 	var args []string
 	for _, a := range ce.Arguments {
@@ -377,7 +377,7 @@ type ArrayLiteral struct {
 }
 
 func (al *ArrayLiteral) expressionNode()      {}
-func (al *ArrayLiteral) TokenLiteral() string  { return al.Token.Literal }
+func (al *ArrayLiteral) TokenLiteral() string { return al.Token.Literal }
 func (al *ArrayLiteral) String() string {
 	var elems []string
 	for _, e := range al.Elements {
@@ -393,7 +393,7 @@ type HashLiteral struct {
 }
 
 func (hl *HashLiteral) expressionNode()      {}
-func (hl *HashLiteral) TokenLiteral() string  { return hl.Token.Literal }
+func (hl *HashLiteral) TokenLiteral() string { return hl.Token.Literal }
 func (hl *HashLiteral) String() string {
 	var pairs []string
 	for k, v := range hl.Pairs {
@@ -410,7 +410,7 @@ type IndexExpression struct {
 }
 
 func (ie *IndexExpression) expressionNode()      {}
-func (ie *IndexExpression) TokenLiteral() string  { return ie.Token.Literal }
+func (ie *IndexExpression) TokenLiteral() string { return ie.Token.Literal }
 func (ie *IndexExpression) String() string {
 	return "(" + ie.Left.String() + "[" + ie.Index.String() + "])"
 }
@@ -424,7 +424,7 @@ type ErrorExpression struct {
 }
 
 func (ee *ErrorExpression) expressionNode()      {}
-func (ee *ErrorExpression) TokenLiteral() string  { return ee.Token.Literal }
+func (ee *ErrorExpression) TokenLiteral() string { return ee.Token.Literal }
 func (ee *ErrorExpression) String() string {
 	return "[解析错误: " + ee.Message + "]"
 }
@@ -444,7 +444,7 @@ type DefineField struct {
 }
 
 func (ds *DefineStatement) statementNode()       {}
-func (ds *DefineStatement) TokenLiteral() string  { return ds.Token.Literal }
+func (ds *DefineStatement) TokenLiteral() string { return ds.Token.Literal }
 func (ds *DefineStatement) String() string {
 	var buf bytes.Buffer
 	buf.WriteString("定义 " + ds.Name + " {")
@@ -470,7 +470,7 @@ type TryCatchStatement struct {
 }
 
 func (ts *TryCatchStatement) statementNode()       {}
-func (ts *TryCatchStatement) TokenLiteral() string  { return ts.Token.Literal }
+func (ts *TryCatchStatement) TokenLiteral() string { return ts.Token.Literal }
 func (ts *TryCatchStatement) String() string {
 	return "执行 " + ts.Body.String() + " 遇到 " + ts.ErrVar + " " + ts.Handler.String()
 }
@@ -487,7 +487,7 @@ type ForInStatement struct {
 }
 
 func (fs *ForInStatement) statementNode()       {}
-func (fs *ForInStatement) TokenLiteral() string  { return fs.Token.Literal }
+func (fs *ForInStatement) TokenLiteral() string { return fs.Token.Literal }
 func (fs *ForInStatement) String() string {
 	var buf bytes.Buffer
 	buf.WriteString("对于 " + fs.VarName)
@@ -511,8 +511,8 @@ type BreakStatement struct {
 }
 
 func (bs *BreakStatement) statementNode()       {}
-func (bs *BreakStatement) TokenLiteral() string  { return bs.Token.Literal }
-func (bs *BreakStatement) String() string        { return "跳出" }
+func (bs *BreakStatement) TokenLiteral() string { return bs.Token.Literal }
+func (bs *BreakStatement) String() string       { return "跳出" }
 
 // ContinueStatement 跳过本次循环
 type ContinueStatement struct {
@@ -520,5 +520,5 @@ type ContinueStatement struct {
 }
 
 func (cs *ContinueStatement) statementNode()       {}
-func (cs *ContinueStatement) TokenLiteral() string  { return cs.Token.Literal }
-func (cs *ContinueStatement) String() string        { return "跳过" }
+func (cs *ContinueStatement) TokenLiteral() string { return cs.Token.Literal }
+func (cs *ContinueStatement) String() string       { return "跳过" }

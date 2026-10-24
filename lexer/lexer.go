@@ -312,8 +312,8 @@ func (l *Lexer) readString() string {
 // 跟踪 {} 深度 + 嵌套字符串状态，确保 f"{大写("hello")}" 正确读取
 func (l *Lexer) readFString() string {
 	var buf []rune
-	l.readChar()       // 跳过开头的引号
-	depth := 0         // {} 深度
+	l.readChar()         // 跳过开头的引号
+	depth := 0           // {} 深度
 	inNestedStr := false // 在 {} 内部是否处于嵌套字符串中
 
 	for l.ch != 0 {

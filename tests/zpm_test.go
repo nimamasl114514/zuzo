@@ -205,7 +205,7 @@ func TestFreeze(t *testing.T) {
 	}
 
 	installed := map[string]string{
-		"网络请求": "1.5.0",
+		"网络请求":   "1.5.0",
 		"json工具": "1.2.0",
 	}
 
@@ -595,8 +595,8 @@ func TestFreezeWithGitHub(t *testing.T) {
 	}
 
 	installed := map[string]string{
-		"网络请求": "1.5.0",
-		"utils":  "v1.0.0",
+		"网络请求":  "1.5.0",
+		"utils": "v1.0.0",
 	}
 
 	output := reqs.Freeze(installed)
@@ -808,8 +808,8 @@ func TestZPackageVerify(t *testing.T) {
 
 func TestParseZPackageRequirement(t *testing.T) {
 	tests := []struct {
-		input   string
-		wantSrc string
+		input    string
+		wantSrc  string
 		wantName string
 	}{
 		{"mylib-1.0.0.z", "zpackage", "mylib-1.0.0"},

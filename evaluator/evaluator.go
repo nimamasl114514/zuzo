@@ -55,8 +55,8 @@ var profileMode bool
 
 // profileData 性能数据收集
 var profileData = struct {
-	calls    map[string]int64
-	time     map[string]int64 // 纳秒
+	calls map[string]int64
+	time  map[string]int64 // 纳秒
 }{
 	calls: make(map[string]int64),
 	time:  make(map[string]int64),
@@ -1252,17 +1252,17 @@ func isError(obj object.Object) bool {
 func registerBuiltins(env *object.Environment) {
 	builtins := map[string]object.BuiltinFunction{
 		// --- 通用 ---
-		"打印":   builtinPrint,
-		"长度":   builtinLen,
-		"类型":   builtinType,
-		"字符串":  builtinStr,
-		"整数":   builtinInt,
+		"打印":  builtinPrint,
+		"长度":  builtinLen,
+		"类型":  builtinType,
+		"字符串": builtinStr,
+		"整数":  builtinInt,
 		"浮点数": builtinFloat,
 
 		// --- 错误内省（与 执行/遇到 搭配使用） ---
-		"错误码":   builtinErrorCode,
+		"错误码":  builtinErrorCode,
 		"错误信息": builtinErrorMessage,
-		"错误行":   builtinErrorLine,
+		"错误行":  builtinErrorLine,
 
 		// --- 数组（builtins_array.go） ---
 		"推入": builtinPush,
@@ -1273,23 +1273,23 @@ func registerBuiltins(env *object.Environment) {
 		"包含": builtinContains,
 
 		// --- 字符串处理（builtins_strings.go） ---
-		"大写":   builtinToUpper,
-		"小写":   builtinToLower,
-		"前缀":   builtinHasPrefix,
-		"后缀":   builtinHasSuffix,
-		"查找":   builtinIndex,
-		"替换":   builtinReplace,
-		"分割":   builtinSplit,
+		"大写":  builtinToUpper,
+		"小写":  builtinToLower,
+		"前缀":  builtinHasPrefix,
+		"后缀":  builtinHasSuffix,
+		"查找":  builtinIndex,
+		"替换":  builtinReplace,
+		"分割":  builtinSplit,
 		"去空白": builtinTrimSpace,
-		"裁剪":   builtinTrim,
-		"重复":   builtinRepeat,
-		"计数":   builtinCount,
-		"分词":   builtinFields,
+		"裁剪":  builtinTrim,
+		"重复":  builtinRepeat,
+		"计数":  builtinCount,
+		"分词":  builtinFields,
 		"取字符": builtinCharAt,
 		"格式化": builtinFormat,
 
 		// --- 哈希（键遍历；支持中文键） ---
-		"键":   builtinKeys,
+		"键":  builtinKeys,
 		"取值": builtinHashGet,
 
 		// --- 并发（builtins_concurrency.go） ---
@@ -1303,34 +1303,34 @@ func registerBuiltins(env *object.Environment) {
 		"尝试执行": builtinTryEval,
 
 		// --- 文件 I/O（builtins_io.go） ---
-		"读文件":   builtinReadFile,
-		"写文件":   builtinWriteFile,
+		"读文件":  builtinReadFile,
+		"写文件":  builtinWriteFile,
 		"追加文件": builtinAppendFile,
 		"读行":   builtinReadLine,
 		"文件存在": builtinFileExists,
 		"创建文件": builtinCreateFile,
 		"删除文件": builtinDeleteFile,
-		"重命名":   builtinRename,
-		"读目录":   builtinReadDir,
+		"重命名":  builtinRename,
+		"读目录":  builtinReadDir,
 
 		"环境变量": builtinGetEnv,
 		"运行参数": builtinCmdArgs,
 
 		// --- 网络（builtins_net.go） ---
-		"http获取":  builtinHttpGet,
-		"http提交":  builtinHttpPost,
-		"http更新":  builtinHttpPut,
-		"http补丁":  builtinHttpPatch,
-		"http删除":  builtinHttpDelete,
-		"http请求":  builtinHttpRequest,
+		"http获取": builtinHttpGet,
+		"http提交": builtinHttpPost,
+		"http更新": builtinHttpPut,
+		"http补丁": builtinHttpPatch,
+		"http删除": builtinHttpDelete,
+		"http请求": builtinHttpRequest,
 
 		// --- HTTP 服务端（builtins_httpserver.go） ---
-		"http服务":     builtinHttpServe,
+		"http服务":   builtinHttpServe,
 		"http服务后台": builtinHttpServeBackground,
-		"http流请求":   builtinHttpStreamRequest,
+		"http流请求":  builtinHttpStreamRequest,
 
 		// --- JSON（builtins_json.go） ---
-		"json解析":   builtinJsonParse,
+		"json解析":  builtinJsonParse,
 		"json序列化": builtinJsonStringify,
 		"json格式化": builtinJsonFormat,
 
@@ -1343,7 +1343,7 @@ func registerBuiltins(env *object.Environment) {
 		"正则提取":   builtinRegexExtract,
 
 		// --- 数学（builtins_math.go） ---
-		"随机":    builtinRandom,
+		"随机":   builtinRandom,
 		"随机整数": builtinRandomInt,
 		"绝对值":  builtinAbs,
 		"最大值":  builtinMax,
@@ -1351,7 +1351,7 @@ func registerBuiltins(env *object.Environment) {
 		"向上取整": builtinCeil,
 		"向下取整": builtinFloor,
 		"四舍五入": builtinRound,
-		"幂":     builtinPow,
+		"幂":    builtinPow,
 		"平方根":  builtinSqrt,
 		"正弦":   builtinSin,
 		"余弦":   builtinCos,
@@ -1360,74 +1360,74 @@ func registerBuiltins(env *object.Environment) {
 		// --- 时间（builtins_time.go） ---
 		"时间戳":   builtinUnixTime,
 		"毫秒时间戳": builtinUnixMilli,
-		"当前时间": builtinNow,
+		"当前时间":  builtinNow,
 		"格式化时间": builtinFormatTime,
-		"解析时间": builtinParseTime,
-		"睡眠":   builtinSleep,
-		"计时":   builtinTimer,
-		"计时秒":  builtinTimerSec,
-		"时间差":  builtinTimeDiff,
+		"解析时间":  builtinParseTime,
+		"睡眠":    builtinSleep,
+		"计时":    builtinTimer,
+		"计时秒":   builtinTimerSec,
+		"时间差":   builtinTimeDiff,
 
 		// --- 浏览器自动化（builtins_browser.go） ---
 		"打开浏览器":  builtinOpenBrowser,
 		"关闭浏览器":  builtinCloseBrowser,
-		"打开页面":  builtinNewPage,
-		"关闭页面":  builtinClosePage,
-		"导航":    builtinNavigate,
-		"当前网址":  builtinPageURL,
-		"页面标题":  builtinPageTitle,
-		"等待元素":  builtinWaitElement,
-		"等待可见":  builtinWaitVisible,
-		"点击":    builtinClickElement,
-		"点击按钮":  builtinClickButton,
-		"填写":    builtinFillInput,
-		"清空输入":  builtinClearInput,
-		"获取文本":  builtinGetText,
-		"获取属性":  builtinGetAttribute,
-		"获取HTML":   builtinGetHTML,
+		"打开页面":   builtinNewPage,
+		"关闭页面":   builtinClosePage,
+		"导航":     builtinNavigate,
+		"当前网址":   builtinPageURL,
+		"页面标题":   builtinPageTitle,
+		"等待元素":   builtinWaitElement,
+		"等待可见":   builtinWaitVisible,
+		"点击":     builtinClickElement,
+		"点击按钮":   builtinClickButton,
+		"填写":     builtinFillInput,
+		"清空输入":   builtinClearInput,
+		"获取文本":   builtinGetText,
+		"获取属性":   builtinGetAttribute,
+		"获取HTML": builtinGetHTML,
 		"获取全部文本": builtinGetFullText,
 		"元素存在":   builtinElementExists,
 		"元素数量":   builtinElementCount,
-		"执行脚本":  builtinEvalJS,
-		"等待跳转":  builtinWaitNavigation,
-		"截图":    builtinScreenshot,
-		"设置视口":  builtinSetViewport,
-		"等待":    builtinBrowserWait,
+		"执行脚本":   builtinEvalJS,
+		"等待跳转":   builtinWaitNavigation,
+		"截图":     builtinScreenshot,
+		"设置视口":   builtinSetViewport,
+		"等待":     builtinBrowserWait,
 
 		// --- 编码/解码（builtins_encoding.go） ---
 		"base64编码":    builtinBase64Encode,
 		"base64解码":    builtinBase64Decode,
 		"base64url编码": builtinBase64URLEncode,
 		"base64url解码": builtinBase64URLDecode,
-		"hex编码":      builtinHexEncode,
-		"hex解码":      builtinHexDecode,
+		"hex编码":       builtinHexEncode,
+		"hex解码":       builtinHexDecode,
 		"html转义":      builtinHTMLEscape,
-		"html反转义":    builtinHTMLUnescape,
-		"url编码":      builtinUrlEncode,
-		"url解码":      builtinUrlDecode,
-		"url路径编码":    builtinUrlPathEncode,
-		"url路径解码":    builtinUrlPathDecode,
+		"html反转义":     builtinHTMLUnescape,
+		"url编码":       builtinUrlEncode,
+		"url解码":       builtinUrlDecode,
+		"url路径编码":     builtinUrlPathEncode,
+		"url路径解码":     builtinUrlPathDecode,
 		"md5":         builtinMD5,
 		"sha1":        builtinSHA1,
 		"sha256":      builtinSHA256,
 
 		// --- UTF-8 / Unicode / 转义（builtins_utf8.go） ---
-		"转义":     builtinEscape,
-		"反转义":     builtinUnescape,
-		"unicode转义": builtinUnicodeEscape,
+		"转义":         builtinEscape,
+		"反转义":        builtinUnescape,
+		"unicode转义":  builtinUnicodeEscape,
 		"unicode反转义": builtinUnicodeUnescape,
-		"码点转字符":   builtinCodepointToChar,
-		"字符转码点":   builtinCharToCodepoint,
-		"utf8验证":   builtinUTF8Valid,
-		"utf8修复":   builtinUTF8Fix,
-		"utf8字节数":  builtinUTF8ByteCount,
-		"转编码":     builtinEncodeTo,
-		"从编码转换":   builtinDecodeFrom,
-		"规范化":     builtinNormalize,
-		"全角转半角":   builtinFullToHalf,
-		"半角转全角":   builtinHalfToFull,
-		"去除不可见":   builtinRemoveInvisible,
-		"去除BOM":   builtinRemoveBOM,
+		"码点转字符":      builtinCodepointToChar,
+		"字符转码点":      builtinCharToCodepoint,
+		"utf8验证":     builtinUTF8Valid,
+		"utf8修复":     builtinUTF8Fix,
+		"utf8字节数":    builtinUTF8ByteCount,
+		"转编码":        builtinEncodeTo,
+		"从编码转换":      builtinDecodeFrom,
+		"规范化":        builtinNormalize,
+		"全角转半角":      builtinFullToHalf,
+		"半角转全角":      builtinHalfToFull,
+		"去除不可见":      builtinRemoveInvisible,
+		"去除BOM":      builtinRemoveBOM,
 
 		// --- BDD 测试框架（builtins_bdd.go） ---
 		"测试套件":   builtinTestSuite,
@@ -1461,9 +1461,9 @@ func registerBuiltins(env *object.Environment) {
 		"WASM关闭":   builtinWasmClose,
 
 		// --- C 库 FFI（builtins_cffi.go） ---
-		"加载C库":   builtinLoadCLib,
+		"加载C库":  builtinLoadCLib,
 		"C函数声明": builtinCFuncDecl,
-		"C调用":     builtinCCall,
+		"C调用":   builtinCCall,
 	}
 
 	// 首次调用时初始化全局 Builtin 池（仅执行一次）

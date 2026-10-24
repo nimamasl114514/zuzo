@@ -345,51 +345,51 @@ func modArgparse(ip *Interp) *object.Module {
 			d := sp.(*object.Dict)
 			nameV, _ := d.Get(&object.Str{V: "name"})
 			name := nameV.Str()
-		action := ""
-		if v, ok := d.Get(&object.Str{V: "action"}); ok {
-			action = v.Str()
-		}
-		dest := strings.TrimLeft(name, "-")
-		if v, ok := d.Get(&object.Str{V: "dest"}); ok {
-			dest = v.Str()
-		}
-		if d.Index(&object.Str{V: "dest"}) >= 0 {
-			_ = dest
-		}
-		var val object.Object
-		if strings.HasPrefix(name, "-") {
-			if action == "store_true" {
-				val = object.FalseObj
-				for _, arg := range argv {
-					if arg == name {
-						val = object.TrueObj
+			action := ""
+			if v, ok := d.Get(&object.Str{V: "action"}); ok {
+				action = v.Str()
+			}
+			dest := strings.TrimLeft(name, "-")
+			if v, ok := d.Get(&object.Str{V: "dest"}); ok {
+				dest = v.Str()
+			}
+			if d.Index(&object.Str{V: "dest"}) >= 0 {
+				_ = dest
+			}
+			var val object.Object
+			if strings.HasPrefix(name, "-") {
+				if action == "store_true" {
+					val = object.FalseObj
+					for _, arg := range argv {
+						if arg == name {
+							val = object.TrueObj
+						}
+					}
+				} else {
+					val = object.None
+					for i, arg := range argv {
+						if arg == name && i+1 < len(argv) {
+							val = &object.Str{V: argv[i+1]}
+						}
 					}
 				}
 			} else {
-				val = object.None
-				for i, arg := range argv {
-					if arg == name && i+1 < len(argv) {
-						val = &object.Str{V: argv[i+1]}
-					}
+				if pos < len(argv) {
+					val = &object.Str{V: argv[pos]}
+					pos++
+				} else {
+					val = object.None
 				}
 			}
-		} else {
-			if pos < len(argv) {
-				val = &object.Str{V: argv[pos]}
-				pos++
-			} else {
-				val = object.None
+			if val == object.None {
+				if dv, ok := d.Get(&object.Str{V: "default"}); ok {
+					val = dv
+				}
 			}
-		}
-		if val == object.None {
-			if dv, ok := d.Get(&object.Str{V: "default"}); ok {
-				val = dv
+			if tv, ok := d.Get(&object.Str{V: "type"}); ok && val != object.None {
+				val = ip.Call(tv, []object.Object{val}, nil)
 			}
-		}
-		if tv, ok := d.Get(&object.Str{V: "type"}); ok && val != object.None {
-			val = ip.Call(tv, []object.Object{val}, nil)
-		}
-		ns.Dict[dest] = val
+			ns.Dict[dest] = val
 		}
 		return ns, nil
 	})

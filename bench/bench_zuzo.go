@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"zuzo/evaluator"
+	"zuzo/infer"
 	"zuzo/lexer"
 	"zuzo/parser"
-	"zuzo/infer"
 )
 
 const N = 100000

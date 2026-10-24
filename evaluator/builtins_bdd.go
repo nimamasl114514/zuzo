@@ -32,11 +32,11 @@ import (
 
 // bddTestCase 单个测试用例
 type bddTestCase struct {
-	name    string
-	fn      *object.Function
-	failed  bool
-	errors  []string
-	skipped bool
+	name     string
+	fn       *object.Function
+	failed   bool
+	errors   []string
+	skipped  bool
 	duration time.Duration
 }
 

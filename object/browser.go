@@ -28,12 +28,12 @@ type Browser struct {
 // NewBrowser 创建浏览器句柄（构造函数，使字段可以从包外设置）
 func NewBrowser(allocCtx, ctx context.Context, cancel context.CancelFunc) *Browser {
 	b := &Browser{allocCtx: allocCtx, ctx: ctx, cancel: cancel}
-	
+
 	// 🌟 优化 2：设置 GC 终结器，防止用户忘记调用 Cancel 导致 chromedp 僵尸进程泄漏
 	runtime.SetFinalizer(b, func(b *Browser) {
 		b.Cancel()
 	})
-	
+
 	return b
 }
 
@@ -81,7 +81,7 @@ func (b *Browser) Cancel() {
 		b.mu.Lock()
 		b.closed = true
 		b.mu.Unlock()
-		
+
 		if b.cancel != nil {
 			b.cancel()
 		}
@@ -115,12 +115,12 @@ type Page struct {
 // NewPage 创建页面句柄（构造函数，使字段可以从包外设置）
 func NewPage(ctx context.Context, cancel context.CancelFunc, browser *Browser) *Page {
 	p := &Page{ctx: ctx, cancel: cancel, browser: browser}
-	
+
 	// 🌟 优化 2：设置 GC 终结器，防止页面标签泄漏
 	runtime.SetFinalizer(p, func(p *Page) {
 		p.Cancel()
 	})
-	
+
 	return p
 }
 
@@ -158,7 +158,7 @@ func (p *Page) Cancel() {
 		p.mu.Lock()
 		p.closed = true
 		p.mu.Unlock()
-		
+
 		if p.cancel != nil {
 			p.cancel()
 		}

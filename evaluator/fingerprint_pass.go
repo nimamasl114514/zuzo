@@ -18,12 +18,12 @@ import (
 
 // FingerprintReport 指纹分析报告
 type FingerprintReport struct {
-	TotalNodes      int                    // 总节点数
-	UniqueNodes     int                    // 唯一指纹数
-	DuplicateGroups []DuplicateGroup       // 重复代码组
-	DeadCodeFound   []DeadCodeFinding      // 死代码发现
-	CSECandidates   []CSECandidate         // CSE 候选
-	PatternWarnings []PatternWarning       // 模式警告
+	TotalNodes      int               // 总节点数
+	UniqueNodes     int               // 唯一指纹数
+	DuplicateGroups []DuplicateGroup  // 重复代码组
+	DeadCodeFound   []DeadCodeFinding // 死代码发现
+	CSECandidates   []CSECandidate    // CSE 候选
+	PatternWarnings []PatternWarning  // 模式警告
 }
 
 // DuplicateGroup 重复代码组
@@ -35,10 +35,10 @@ type DuplicateGroup struct {
 
 // DeadCodeFinding 死代码发现
 type DeadCodeFinding struct {
-	Pattern     string // 模式描述，如 "x * 0"
-	Suggestion  string // 优化建议，如 "可替换为 0"
-	Location    string // 源码位置
-	NodeType    string // 节点类型
+	Pattern    string // 模式描述，如 "x * 0"
+	Suggestion string // 优化建议，如 "可替换为 0"
+	Location   string // 源码位置
+	NodeType   string // 节点类型
 }
 
 // CSECandidate 公共子表达式消除候选
@@ -59,8 +59,8 @@ type PatternWarning struct {
 
 // FingerprintPass 指纹分析 pass
 type FingerprintPass struct {
-	table   *ast.FingerprintTable
-	report  *FingerprintReport
+	table    *ast.FingerprintTable
+	report   *FingerprintReport
 	patterns *DeadCodePatterns
 }
 
@@ -250,7 +250,7 @@ type WarningPattern struct {
 // DeadCodePatterns 死代码模式库
 type DeadCodePatterns struct {
 	deadCodes map[uint64]DeadCodePattern
-	warnings map[uint64]WarningPattern
+	warnings  map[uint64]WarningPattern
 }
 
 // NewDeadCodePatterns 创建死代码模式库

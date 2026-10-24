@@ -8,19 +8,19 @@ package pyparse
 // 本文件负责这一层翻译；遇到未知操作符直接返回原值，由上层报错暴露。
 
 var binOpSymbol = map[string]string{
-	"Add":       "+",
-	"Sub":       "-",
-	"Mult":      "*",
-	"Div":       "/",
-	"FloorDiv":  "//",
-	"Mod":       "%",
-	"Pow":       "**",
-	"MatMult":   "@",
-	"LShift":    "<<",
-	"RShift":    ">>",
-	"BitOr":     "|",
-	"BitXor":    "^",
-	"BitAnd":    "&",
+	"Add":      "+",
+	"Sub":      "-",
+	"Mult":     "*",
+	"Div":      "/",
+	"FloorDiv": "//",
+	"Mod":      "%",
+	"Pow":      "**",
+	"MatMult":  "@",
+	"LShift":   "<<",
+	"RShift":   ">>",
+	"BitOr":    "|",
+	"BitXor":   "^",
+	"BitAnd":   "&",
 }
 
 var unaryOpSymbol = map[string]string{

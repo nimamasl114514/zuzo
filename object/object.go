@@ -54,7 +54,7 @@ func (i *Integer) HashKey() HashKey {
 type Float struct{ Value float64 }
 
 func (f *Float) Type() ObjectType { return FLOAT_OBJ }
-func (f *Float) Inspect() string  {
+func (f *Float) Inspect() string {
 	// 去除不必要的小数位，但保留至少一位
 	s := strconv.FormatFloat(f.Value, 'f', -1, 64)
 	return s
@@ -222,7 +222,8 @@ func (h *Hash) Inspect() string {
 		pair := h.Pairs[hk]
 		pairs = append(pairs, fmt.Sprintf("%s: %s", pair.Key.Inspect(), pair.Value.Inspect()))
 	}
-	return "{" + joinStrings(pairs, ", ") + "}"}
+	return "{" + joinStrings(pairs, ", ") + "}"
+}
 
 // Hashable 可哈希对象接口
 type Hashable interface {
@@ -236,12 +237,12 @@ type Environment struct {
 	valueSlots []Value           // Smi：64 位标记值槽位（零堆分配）
 	slotMap    map[string]int    // SAP：变量名 → 槽位索引映射（仅 SAP 根环境持有）
 	outer      *Environment
-	context    *Context           // De Bruijn：扁平帧栈（Level 5 热路径使用）
+	context    *Context // De Bruijn：扁平帧栈（Level 5 热路径使用）
 }
 
 // Module 模块对象：导入文件的命名空间包装
 type Module struct {
-	Name string      // 模块名
+	Name string       // 模块名
 	Env  *Environment // 模块的环境（包含所有导出的变量/函数）
 }
 
@@ -401,6 +402,7 @@ func (e *Environment) HasSlots() bool {
 // --- Smi Value 槽位操作（零堆分配，直接寄存器级运算） ---
 
 // GetValueSlot 按 Smi 槽位索引获取 Value（8 字节标量，无接口开销）
+//
 //go:inline
 func (e *Environment) GetValueSlot(idx int) Value {
 	if idx < len(e.valueSlots) {
@@ -410,6 +412,7 @@ func (e *Environment) GetValueSlot(idx int) Value {
 }
 
 // SetValueSlot 按 Smi 槽位索引设置 Value
+//
 //go:inline
 func (e *Environment) SetValueSlot(idx int, val Value) {
 	if idx >= len(e.valueSlots) {
@@ -422,6 +425,7 @@ func (e *Environment) SetValueSlot(idx int, val Value) {
 }
 
 // HasValueSlots 是否启用了 Smi 槽位模式
+//
 //go:inline
 func (e *Environment) HasValueSlots() bool {
 	return e.valueSlots != nil

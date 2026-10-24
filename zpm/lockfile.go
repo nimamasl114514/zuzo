@@ -15,18 +15,18 @@ import (
 // LockEntry 锁文件中单个依赖的记录
 type LockEntry struct {
 	Name     string `json:"name"`
-	Version  string `json:"version"`             // 已安装版本
-	Spec     string `json:"spec"`                 // 原始规格
-	Source   string `json:"source"`               // 来源: git URL / file path / registry
-	Resolved string `json:"resolved"`             // 精确解析地址
-	Hash     string `json:"hash,omitempty"`       // 内容哈希（用于变更检测）
+	Version  string `json:"version"`        // 已安装版本
+	Spec     string `json:"spec"`           // 原始规格
+	Source   string `json:"source"`         // 来源: git URL / file path / registry
+	Resolved string `json:"resolved"`       // 精确解析地址
+	Hash     string `json:"hash,omitempty"` // 内容哈希（用于变更检测）
 }
 
 // Lockfile 锁文件结构
 type Lockfile struct {
-	Version  int                    `json:"version"`  // 锁文件格式版本
-	Packages map[string]*LockEntry  `json:"packages"` // 包名 → 锁定记录
-	path     string                  // 锁文件路径（内部使用）
+	Version  int                   `json:"version"`  // 锁文件格式版本
+	Packages map[string]*LockEntry `json:"packages"` // 包名 → 锁定记录
+	path     string                // 锁文件路径（内部使用）
 }
 
 // NewLockfile 创建空锁文件

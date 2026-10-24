@@ -15,12 +15,12 @@ import (
 
 // 类型错误码常量（与 diagnostic/errorcode.go 对应）
 const (
-	ErrCodeTypeMismatch  = "E101" // 类型不匹配
-	ErrCodeUndefinedVar  = "E102" // 未定义变量
-	ErrCodeArgCount      = "E103" // 参数数量不匹配
-	ErrCodeNotCallable   = "E104" // 不可调用
+	ErrCodeTypeMismatch   = "E101" // 类型不匹配
+	ErrCodeUndefinedVar   = "E102" // 未定义变量
+	ErrCodeArgCount       = "E103" // 参数数量不匹配
+	ErrCodeNotCallable    = "E104" // 不可调用
 	ErrCodeBranchMismatch = "E105" // 分支类型不一致
-	ErrCodeArrayMixed    = "E106" // 数组元素类型不一致
+	ErrCodeArrayMixed     = "E106" // 数组元素类型不一致
 )
 
 // Type 类型系统的核心接口
@@ -99,9 +99,9 @@ func (t *TypeVar) resolved() Type {
 // TypeFunc 函数类型：参数列表 -> 返回值
 // Variadic=true 表示最后一个参数可以重复（可变参数函数，如 打印、格式化、C调用）
 type TypeFunc struct {
-	Params    []Type
-	Return    Type
-	Variadic  bool // 是否可变参数
+	Params   []Type
+	Return   Type
+	Variadic bool // 是否可变参数
 }
 
 func (t TypeFunc) String() string {
@@ -216,7 +216,7 @@ func ParseTypeAnnotation(name string) (Type, bool) {
 
 func (i *Inferencer) GetSlotMap() map[string]int { return i.SlotMap }
 func (i *Inferencer) GetEnv() map[string]Type    { return i.env }
-func ResolvedType(t Type) Type                  { return t.resolved() }
+func ResolvedType(t Type) Type                   { return t.resolved() }
 
 func (i *Inferencer) GetNodeType(node ast.Node) Type {
 	if t, ok := i.NodeTypes[node]; ok {
@@ -264,12 +264,12 @@ func getNodePosition(node ast.Node) (int, int) {
 	if v.Kind() != reflect.Struct {
 		return 0, 0
 	}
-	
+
 	tokenField := v.FieldByName("Token")
 	if !tokenField.IsValid() {
 		return 0, 0
 	}
-	
+
 	line := tokenField.FieldByName("Line")
 	col := tokenField.FieldByName("Column")
 	if line.IsValid() && col.IsValid() {

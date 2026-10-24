@@ -433,10 +433,11 @@ func builtinDecodeFrom(args ...object.Object) object.Object {
 
 // 规范化(s, 形式) → 字符串 — Unicode 规范化
 // 形式: "NFC"（默认）、"NFD"、"NFKC"、"NFKD"
-//   NFC  — 规范化组合（推荐，最常用）
-//   NFD  — 规范化分解
-//   NFKC — 兼容性组合
-//   NFKD — 兼容性分解
+//
+//	NFC  — 规范化组合（推荐，最常用）
+//	NFD  — 规范化分解
+//	NFKC — 兼容性组合
+//	NFKD — 兼容性分解
 func builtinNormalize(args ...object.Object) object.Object {
 	if len(args) < 1 || len(args) > 2 {
 		return newError("规范化() 期望 1-2 个参数，得到 %d 个", len(args))

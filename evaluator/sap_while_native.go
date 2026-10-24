@@ -117,6 +117,7 @@ func (c *SAPCompiler) matchWhileNative(n *ast.WhileStatement) (*whileNativePatte
 }
 
 // whileCondBreaks 判断当前 iVal 是否应退出循环（与运算符语义一致）
+//
 //go:inline
 func whileCondBreaks(op string, iVal, bound int64) bool {
 	switch op {

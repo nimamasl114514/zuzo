@@ -8,21 +8,21 @@ import (
 
 // Function 用户定义函数
 type Function struct {
-	Name       string
-	QualName   string
-	Params     *ast.Params
-	Body       []ast.Stmt
-	LambdaBody ast.Expr // 非 nil 表示 lambda（直接求值表达式）
-	Globals    *Env  // 全局环境
-	Closure    *Env  // 定义时的环境
+	Name        string
+	QualName    string
+	Params      *ast.Params
+	Body        []ast.Stmt
+	LambdaBody  ast.Expr // 非 nil 表示 lambda（直接求值表达式）
+	Globals     *Env     // 全局环境
+	Closure     *Env     // 定义时的环境
 	ArgDefaults []Object // 与 Params.Args 等长，nil 表示无默认值
-	Defaults   []Object
-	KwDefaults map[string]Object
+	Defaults    []Object
+	KwDefaults  map[string]Object
 	IsGenerator bool
-	IsAsync    bool
-	Doc        string
-	Module     string
-	Dict       *Dict // 函数属性
+	IsAsync     bool
+	Doc         string
+	Module      string
+	Dict        *Dict // 函数属性
 }
 
 func (f *Function) Type() *TypeObj { return funcType }
@@ -121,7 +121,7 @@ func newTuple(items []Object) *Tuple { return &Tuple{Items: items} }
 type Generator struct {
 	Class *TypeObj
 	// Next 推进生成器，返回 (值, 是否结束, 错误)
-	Next  func() (Object, bool, error)
+	Next   func() (Object, bool, error)
 	Send   func(v Object) (Object, bool, error)
 	Close  func()
 	Name   string
@@ -340,7 +340,6 @@ func (l *PyLock) Release() {
 	default:
 	}
 }
-
 
 // FieldSpec dataclasses.field 的返回物
 type FieldSpec struct {

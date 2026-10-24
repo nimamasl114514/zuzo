@@ -48,15 +48,15 @@ import (
 // ==================== 常量 ====================
 
 const (
-	PackageExtension = ".z"          // .z 包文件扩展名
-	MetaDir          = "META-INF"    // 存根目录
-	CodeDir          = "code"        // 代码目录
-	ResourceDir      = "resources"   // 资源目录
+	PackageExtension = ".z"        // .z 包文件扩展名
+	MetaDir          = "META-INF"  // 存根目录
+	CodeDir          = "code"      // 代码目录
+	ResourceDir      = "resources" // 资源目录
 
-	ManifestStub  = "META-INF/MANIFEST.toml"   // 包元信息存根
-	ExportsStub   = "META-INF/EXPORTS.zstub"    // 导出符号存根
-	DepsStub      = "META-INF/DEPS.toml"        // 依赖存根
-	ReadmeStub    = "META-INF/README.md"        // 说明文件存根
+	ManifestStub = "META-INF/MANIFEST.toml" // 包元信息存根
+	ExportsStub  = "META-INF/EXPORTS.zstub" // 导出符号存根
+	DepsStub     = "META-INF/DEPS.toml"     // 依赖存根
+	ReadmeStub   = "META-INF/README.md"     // 说明文件存根
 )
 
 // ZPackage .z 包结构
@@ -77,7 +77,7 @@ type ExportTable struct {
 // ExportFunc 导出的函数签名
 type ExportFunc struct {
 	Name       string `json:"name"`
-	Params     string `json:"params"`     // 参数列表，如 "(a, b)"
+	Params     string `json:"params"`      // 参数列表，如 "(a, b)"
 	ReturnType string `json:"return_type"` // 返回类型，如 "字符串"
 	File       string `json:"file"`        // 定义所在文件
 	Line       int    `json:"line"`
@@ -100,10 +100,10 @@ type ExportModule struct {
 
 // PackOptions 打包选项
 type PackOptions struct {
-	OutputDir  string // 输出目录（默认当前目录）
-	OutputName string // 自定义输出文件名（不含扩展名）
-	IncludeTests  bool // 是否包含测试文件
-	IncludeReadme bool // 是否包含 README
+	OutputDir     string // 输出目录（默认当前目录）
+	OutputName    string // 自定义输出文件名（不含扩展名）
+	IncludeTests  bool   // 是否包含测试文件
+	IncludeReadme bool   // 是否包含 README
 }
 
 // Pack 将项目目录打包为 .z 文件
@@ -535,7 +535,7 @@ func scanExports(source string, filePath string, exports *ExportTable) {
 			rest = strings.TrimSpace(strings.TrimPrefix(rest, "func "))
 
 			// 提取函数名和参数
-		parenIdx := strings.Index(rest, "(")
+			parenIdx := strings.Index(rest, "(")
 			if parenIdx > 0 {
 				name := strings.TrimSpace(rest[:parenIdx])
 				params := ""

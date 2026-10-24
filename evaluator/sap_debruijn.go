@@ -200,12 +200,12 @@ func (r *DeBruijnResolver) resolveExpr(expr ast.Expression) {
 
 // dbOp De Bruijn 原生操作——用 (Depth, Slot) 替代扁平 slot
 type dbOp struct {
-	kind      nativeOpKind
-	destIdx   object.DeBruijnIndex
-	destName  string // 循环后同步到 Environment
-	srcIdx1   object.DeBruijnIndex
-	srcIdx2   object.DeBruijnIndex
-	constVal  int64
+	kind     nativeOpKind
+	destIdx  object.DeBruijnIndex
+	destName string // 循环后同步到 Environment
+	srcIdx1  object.DeBruijnIndex
+	srcIdx2  object.DeBruijnIndex
+	constVal int64
 }
 
 // ================================================================

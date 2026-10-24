@@ -252,6 +252,7 @@ func builtinHttpServeBackground(args ...object.Object) object.Object {
 	}()
 	return &object.Null{}
 }
+
 // ==================== 流式 HTTP 客户端内置（反代场景：逐行回调上游 SSE） ====================
 
 // 共享 Transport：连接复用（每次新建 Client 会重新握手，反代场景累加 100~300ms）

@@ -61,7 +61,7 @@ func main() {
 			shadowLenient = true
 		case "--strict":
 			strict = true
-	case "--trace":
+		case "--trace":
 			trace = true
 		case "--debug":
 			debug = true
@@ -440,7 +440,7 @@ func startREPL(in io.Reader, out io.Writer) {
 				continue
 			}
 
-				// 输出活字诊断报告并重置
+			// 输出活字诊断报告并重置
 			p.Diagnostics().SetSource(source)
 			fmt.Fprint(out, p.Diagnostics().Render())
 			inputBuf.Reset()

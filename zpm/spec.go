@@ -29,13 +29,13 @@ const (
 
 // Spec 解析后的依赖规格
 type Spec struct {
-	Raw      string   // 原始规格字符串
-	Type     SpecType // 规格类型
-	Version  string   // 语义版本（仅 SpecRegistry）
-	GitURL   string   // Git URL（仅 SpecGit）
-	GitRef   string   // Git 引用: tag/branch/commit（仅 SpecGit）
-	GitSubdir string  // Git 仓库子目录（仅 SpecGit，可选）
-	LocalPath string  // 本地路径（仅 SpecLocal）
+	Raw       string   // 原始规格字符串
+	Type      SpecType // 规格类型
+	Version   string   // 语义版本（仅 SpecRegistry）
+	GitURL    string   // Git URL（仅 SpecGit）
+	GitRef    string   // Git 引用: tag/branch/commit（仅 SpecGit）
+	GitSubdir string   // Git 仓库子目录（仅 SpecGit，可选）
+	LocalPath string   // 本地路径（仅 SpecLocal）
 }
 
 // ParseSpec 解析依赖规格字符串

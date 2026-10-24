@@ -229,8 +229,9 @@ func builtinCharAt(args ...object.Object) object.Object {
 }
 
 // 格式化 — 两种模式：
-//   格式化("模板 %d %s", 参数...)  — sprintf 风格（Go fmt.Sprintf）
-//   格式化(数值, 位数)              — 浮点数格式化（向后兼容）
+//
+//	格式化("模板 %d %s", 参数...)  — sprintf 风格（Go fmt.Sprintf）
+//	格式化(数值, 位数)              — 浮点数格式化（向后兼容）
 func builtinFormat(args ...object.Object) object.Object {
 	if len(args) < 1 {
 		return newError("格式化() 至少需要 1 个参数")

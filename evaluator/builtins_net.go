@@ -268,4 +268,3 @@ func builtinHttpRequest(args ...object.Object) object.Object {
 
 	return result
 }
-

@@ -26,39 +26,43 @@ import (
 // ================================================================
 
 const (
-	heapTagShift  = 1                     // 类型标记从 bit 1 开始
-	heapTagBits   = 4                     // 4 bits 类型
-	heapTagMask   = Value(0x1E)           // bits 1-4
-	heapIdxShift  = 5                     // 索引从 bit 5 开始
-	heapNil       = Value(0)              // 零值 = Nil
-	heapString    = Value(0x02)           // type=1
-	heapFloat     = Value(0x04)           // type=2
-	heapBool      = Value(0x06)           // type=3
-	heapArray     = Value(0x08)           // type=4
-	heapHash      = Value(0x0A)           // type=5
-	heapBuiltin   = Value(0x0C)           // type=6
-	heapFunc      = Value(0x0E)           // type=7
+	heapTagShift = 1           // 类型标记从 bit 1 开始
+	heapTagBits  = 4           // 4 bits 类型
+	heapTagMask  = Value(0x1E) // bits 1-4
+	heapIdxShift = 5           // 索引从 bit 5 开始
+	heapNil      = Value(0)    // 零值 = Nil
+	heapString   = Value(0x02) // type=1
+	heapFloat    = Value(0x04) // type=2
+	heapBool     = Value(0x06) // type=3
+	heapArray    = Value(0x08) // type=4
+	heapHash     = Value(0x0A) // type=5
+	heapBuiltin  = Value(0x0C) // type=6
+	heapFunc     = Value(0x0E) // type=7
 )
 
 // makeHeapValue 构造堆句柄 Value
+//
 //go:inline
 func makeHeapValue(tag Value, idx int) Value {
 	return (Value(idx) << heapIdxShift) | tag
 }
 
 // IsHeap 判断 Value 是否为堆对象句柄（非 Smi 且非零值）
+//
 //go:inline
 func (v Value) IsHeap() bool {
 	return v != 0 && v&smiMask == 0
 }
 
 // HeapType 返回堆对象的类型标记
+//
 //go:inline
 func (v Value) HeapType() Value {
 	return v & heapTagMask
 }
 
 // HeapIndex 返回堆对象的池内索引
+//
 //go:inline
 func (v Value) HeapIndex() int {
 	return int(v >> heapIdxShift)
@@ -83,22 +87,22 @@ func HeapTypeArray() Value { return heapArray }
 // Arena 预分配的类型化对象池，bump allocation + batch reset
 type Arena struct {
 	// 类型化池——GC 可见，安全追踪指针
-	strings  []string     // String 池
-	floats   []float64    // Float 池
-	bools    []bool       // Boolean 池
-	arrays   [][]Value    // Array 池（元素为 Value）
-	hashKeys []Value      // Hash 键池
-	hashVals []Value      // Hash 值池
+	strings  []string  // String 池
+	floats   []float64 // Float 池
+	bools    []bool    // Boolean 池
+	arrays   [][]Value // Array 池（元素为 Value）
+	hashKeys []Value   // Hash 键池
+	hashVals []Value   // Hash 值池
 
 	// 快照标记（用于 scoped reset）
 	marks arenaMarks
 }
 
 type arenaMarks struct {
-	strMark  int
-	fltMark  int
-	blnMark  int
-	arrMark  int
+	strMark int
+	fltMark int
+	blnMark int
+	arrMark int
 }
 
 // NewArena 创建 Arena，preAlloc 为每种池的预分配容量
@@ -117,6 +121,7 @@ func NewArena(preAlloc int) *Arena {
 // --- Bump 分配方法（每次分配 = 1 次 append，无 new()） ---
 
 // AllocString 分配一个字符串到池中，返回堆句柄 Value
+//
 //go:inline
 func (a *Arena) AllocString(s string) Value {
 	idx := len(a.strings)
@@ -125,6 +130,7 @@ func (a *Arena) AllocString(s string) Value {
 }
 
 // AllocFloat 分配一个浮点数到池中
+//
 //go:inline
 func (a *Arena) AllocFloat(f float64) Value {
 	idx := len(a.floats)
@@ -133,6 +139,7 @@ func (a *Arena) AllocFloat(f float64) Value {
 }
 
 // AllocBool 分配一个布尔值到池中
+//
 //go:inline
 func (a *Arena) AllocBool(b bool) Value {
 	idx := len(a.bools)
@@ -141,6 +148,7 @@ func (a *Arena) AllocBool(b bool) Value {
 }
 
 // AllocArray 分配一个数组到池中（elements 为 Value 切片）
+//
 //go:inline
 func (a *Arena) AllocArray(elements []Value) Value {
 	idx := len(a.arrays)
@@ -151,24 +159,28 @@ func (a *Arena) AllocArray(elements []Value) Value {
 // --- 读取方法 ---
 
 // GetString 按堆句柄获取字符串
+//
 //go:inline
 func (a *Arena) GetString(v Value) string {
 	return a.strings[v.HeapIndex()]
 }
 
 // GetFloat 按堆句柄获取浮点数
+//
 //go:inline
 func (a *Arena) GetFloat(v Value) float64 {
 	return a.floats[v.HeapIndex()]
 }
 
 // GetBool 按堆句柄获取布尔值
+//
 //go:inline
 func (a *Arena) GetBool(v Value) bool {
 	return a.bools[v.HeapIndex()]
 }
 
 // GetArray 按堆句柄获取数组元素切片
+//
 //go:inline
 func (a *Arena) GetArray(v Value) []Value {
 	return a.arrays[v.HeapIndex()]
@@ -179,6 +191,7 @@ func (a *Arena) GetArray(v Value) []Value {
 // ValueToObject 将 Value 转换为 Object（需要 Arena 引用）
 // 对于 Smi 值，使用小整数缓存
 // 对于堆句柄，从 Arena 池中取出并包装为 Object
+//
 //go:inline
 func (a *Arena) ValueToObject(v Value) Object {
 	if v.IsSmi() {
@@ -211,6 +224,7 @@ func (a *Arena) ValueToObject(v Value) Object {
 // ObjectToValue 将 Object 转换为 Value（存入 Context 槽位）
 // Integer → Smi（零分配）
 // String/Float/Bool/Array → Arena 堆句柄（1 次 append，无 new()）
+//
 //go:inline
 func (a *Arena) ObjectToValue(obj Object) Value {
 	if obj == nil {
@@ -299,6 +313,7 @@ func InitBuiltinPool(builtins map[string]BuiltinFunction) {
 }
 
 // GetBuiltin 从池中获取 Builtin（零分配，复用已有对象）
+//
 //go:inline
 func GetBuiltin(name string) *Builtin {
 	if b, ok := builtinPool[name]; ok {

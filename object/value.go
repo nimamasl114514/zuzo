@@ -31,19 +31,21 @@ package object
 type Value uint64
 
 const (
-	smiTag  Value = 1 // LSB = 1 表示 Smi
-	smiMask Value = 1
+	smiTag   Value = 1 // LSB = 1 表示 Smi
+	smiMask  Value = 1
 	smiShift       = 1 // Smi 值左移 1 位腾出 tag 位
 )
 
 // Smi 将 int64 编码为 Smi Value（零堆分配）
 // 编码：(n << 1) | 1，即左移 1 位后设置最低位为 1
+//
 //go:inline
 func Smi(n int64) Value {
 	return Value((uint64(n) << smiShift) | uint64(smiTag))
 }
 
 // IsSmi 判断 Value 是否为 Smi（小整数）
+//
 //go:inline
 func (v Value) IsSmi() bool {
 	return v&smiMask == smiTag
@@ -52,12 +54,14 @@ func (v Value) IsSmi() bool {
 // AsSmi 从 Smi Value 中提取 int64 值
 // 调用者必须确保 IsSmi() 为 true
 // 关键：先转 int64 再右移，确保负数使用算术右移（填充符号位而非 0）
+//
 //go:inline
 func (v Value) AsSmi() int64 {
 	return int64(v) >> smiShift
 }
 
 // IsNil 判断 Value 是否为零值（未初始化）
+//
 //go:inline
 func (v Value) IsNil() bool {
 	return v == 0
@@ -85,6 +89,7 @@ func init() {
 // 对于非 Smi 值（预留），返回 NULL。
 //
 // 注意：此方法仅在循环退出时调用（同步槽位），不在热路径中。
+//
 //go:inline
 func (v Value) AsObject() Object {
 	if v.IsSmi() {
@@ -101,6 +106,7 @@ func (v Value) AsObject() Object {
 // ObjectAsSmi 尝试将 Object 转换为 Smi Value。
 // 如果 obj 是 Integer，返回 Smi 编码和 true。
 // 否则返回 0 和 false（调用者应回退到 Object 槽位）。
+//
 //go:inline
 func ObjectAsSmi(obj Object) (Value, bool) {
 	if intObj, ok := obj.(*Integer); ok {

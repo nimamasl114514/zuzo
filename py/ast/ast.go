@@ -228,28 +228,28 @@ type Assert struct {
 	Msg  Expr
 }
 
-func (*ExprStmt) stmtNode()  {}
-func (*Assign) stmtNode()    {}
-func (*AugAssign) stmtNode() {}
-func (*AnnAssign) stmtNode() {}
-func (*If) stmtNode()        {}
-func (*While) stmtNode()     {}
-func (*For) stmtNode()       {}
-func (*FuncDef) stmtNode()   {}
-func (*ClassDef) stmtNode()  {}
-func (*Return) stmtNode()    {}
-func (*Break) stmtNode()     {}
-func (*Continue) stmtNode()  {}
-func (*Pass) stmtNode()      {}
-func (*Try) stmtNode()       {}
-func (*Raise) stmtNode()     {}
-func (*With) stmtNode()      {}
-func (*Import) stmtNode()    {}
+func (*ExprStmt) stmtNode()   {}
+func (*Assign) stmtNode()     {}
+func (*AugAssign) stmtNode()  {}
+func (*AnnAssign) stmtNode()  {}
+func (*If) stmtNode()         {}
+func (*While) stmtNode()      {}
+func (*For) stmtNode()        {}
+func (*FuncDef) stmtNode()    {}
+func (*ClassDef) stmtNode()   {}
+func (*Return) stmtNode()     {}
+func (*Break) stmtNode()      {}
+func (*Continue) stmtNode()   {}
+func (*Pass) stmtNode()       {}
+func (*Try) stmtNode()        {}
+func (*Raise) stmtNode()      {}
+func (*With) stmtNode()       {}
+func (*Import) stmtNode()     {}
 func (*ImportFrom) stmtNode() {}
-func (*Global) stmtNode()    {}
-func (*Nonlocal) stmtNode()  {}
-func (*Del) stmtNode()       {}
-func (*Assert) stmtNode()    {}
+func (*Global) stmtNode()     {}
+func (*Nonlocal) stmtNode()   {}
+func (*Del) stmtNode()        {}
+func (*Assert) stmtNode()     {}
 
 // ==================== 表达式 ====================
 
@@ -454,33 +454,33 @@ type Await struct {
 // EllipsisEllipsis 字面量 ...
 type Ellipsis struct{ Pos }
 
-func (*Name) exprNode()       {}
-func (*Number) exprNode()     {}
-func (*String) exprNode()     {}
-func (*FString) exprNode()    {}
-func (*List) exprNode()       {}
-func (*Tuple) exprNode()      {}
-func (*Set) exprNode()        {}
-func (*Dict) exprNode()       {}
-func (*ListComp) exprNode()   {}
-func (*SetComp) exprNode()    {}
-func (*DictComp) exprNode()   {}
-func (*GenExp) exprNode()     {}
-func (*BinOp) exprNode()      {}
-func (*UnaryOp) exprNode()    {}
-func (*BoolOp) exprNode()     {}
-func (*Compare) exprNode()    {}
-func (*Call) exprNode()       {}
-func (*Attribute) exprNode()  {}
-func (*Subscript) exprNode()  {}
-func (*SliceExpr) exprNode()  {}
-func (*IfExp) exprNode()      {}
-func (*Lambda) exprNode()     {}
-func (*Starred) exprNode()    {}
-func (*NamedExpr) exprNode()  {}
-func (*Yield) exprNode()      {}
-func (*Await) exprNode()      {}
-func (*Ellipsis) exprNode()   {}
+func (*Name) exprNode()      {}
+func (*Number) exprNode()    {}
+func (*String) exprNode()    {}
+func (*FString) exprNode()   {}
+func (*List) exprNode()      {}
+func (*Tuple) exprNode()     {}
+func (*Set) exprNode()       {}
+func (*Dict) exprNode()      {}
+func (*ListComp) exprNode()  {}
+func (*SetComp) exprNode()   {}
+func (*DictComp) exprNode()  {}
+func (*GenExp) exprNode()    {}
+func (*BinOp) exprNode()     {}
+func (*UnaryOp) exprNode()   {}
+func (*BoolOp) exprNode()    {}
+func (*Compare) exprNode()   {}
+func (*Call) exprNode()      {}
+func (*Attribute) exprNode() {}
+func (*Subscript) exprNode() {}
+func (*SliceExpr) exprNode() {}
+func (*IfExp) exprNode()     {}
+func (*Lambda) exprNode()    {}
+func (*Starred) exprNode()   {}
+func (*NamedExpr) exprNode() {}
+func (*Yield) exprNode()     {}
+func (*Await) exprNode()     {}
+func (*Ellipsis) exprNode()  {}
 
 // ==================== match 语句（结构化模式匹配） ====================
 
@@ -544,9 +544,9 @@ type PSequence struct {
 // PMapping 映射模式 {"k": v, **rest}
 type PMapping struct {
 	Pos
-	Keys  []Expr
-	Vals  []Pattern
-	Rest  string
+	Keys []Expr
+	Vals []Pattern
+	Rest string
 }
 
 // KeywordPat 类模式的关键字子模式

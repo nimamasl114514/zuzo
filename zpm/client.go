@@ -39,14 +39,14 @@ func RegistryURL() string {
 
 // PackageInfo 注册表返回的包信息
 type PackageInfo struct {
-	Name        string            `json:"name"`
-	Version     string            `json:"version"`
-	Description string            `json:"description"`
-	Author      string            `json:"author"`
-	Versions    []string          `json:"versions"`
-	Latest      string            `json:"latest"`
-	DownloadURL string            `json:"download_url"` // 直接下载地址
-	GitURL      string            `json:"git_url"`      // Git 克隆地址（回退方案）
+	Name        string   `json:"name"`
+	Version     string   `json:"version"`
+	Description string   `json:"description"`
+	Author      string   `json:"author"`
+	Versions    []string `json:"versions"`
+	Latest      string   `json:"latest"`
+	DownloadURL string   `json:"download_url"` // 直接下载地址
+	GitURL      string   `json:"git_url"`      // Git 克隆地址（回退方案）
 }
 
 // SearchResult 搜索结果条目

@@ -766,6 +766,7 @@ func (c *SAPCompiler) tryCompileForSmiNative(n *ast.ForStatement) CompileFunc {
 		return NULL
 	}
 }
+
 type syncVar struct {
 	name string
 	slot int

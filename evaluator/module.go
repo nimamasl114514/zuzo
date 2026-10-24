@@ -43,19 +43,19 @@ import (
 
 // ModuleManager 模块管理器：处理文件导入、路径解析、循环检测
 type ModuleManager struct {
-	baseDir    string             // 基准目录（用于解析相对路径）
-	projectRoot string            // 项目根目录（包含 zpm.toml 的目录，用于搜索 zpm_modules/）
-	loading    map[string]bool    // 正在加载的文件（循环检测）
-	cache      map[string]object.Object // 已加载的模块缓存
+	baseDir     string                   // 基准目录（用于解析相对路径）
+	projectRoot string                   // 项目根目录（包含 zpm.toml 的目录，用于搜索 zpm_modules/）
+	loading     map[string]bool          // 正在加载的文件（循环检测）
+	cache       map[string]object.Object // 已加载的模块缓存
 }
 
 // NewModuleManager 创建模块管理器
 func NewModuleManager(baseDir string) *ModuleManager {
 	return &ModuleManager{
-		baseDir:      baseDir,
-		projectRoot:  findProjectRoot(baseDir),
-		loading:      make(map[string]bool),
-		cache:        make(map[string]object.Object),
+		baseDir:     baseDir,
+		projectRoot: findProjectRoot(baseDir),
+		loading:     make(map[string]bool),
+		cache:       make(map[string]object.Object),
 	}
 }
 

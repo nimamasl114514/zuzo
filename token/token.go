@@ -55,7 +55,7 @@ const (
 	LET      = "变量"
 	FUNCTION = "函数"
 	IF       = "如果"
-	ELSE     = "否则"   // 也用作 fallback 运算符
+	ELSE     = "否则" // 也用作 fallback 运算符
 	WHILE    = "当"
 	FOR      = "对于"
 	RETURN   = "返回"
@@ -67,14 +67,14 @@ const (
 	NOT      = "非"
 	IMPORT   = "导入"
 	AS       = "为"
-	DEFINE   = "定义"   // 数据建模
-	TRY      = "执行"   // 错误处理
-	CATCH    = "遇到"   // 错误捕获
-	IN       = "在"     // 迭代器
-	TO       = "到"     // 范围
-	WHEN     = "满足"   // 条件过滤
-	SKIP     = "跳过"   // continue
-	BREAK    = "跳出"   // break
+	DEFINE   = "定义" // 数据建模
+	TRY      = "执行" // 错误处理
+	CATCH    = "遇到" // 错误捕获
+	IN       = "在"  // 迭代器
+	TO       = "到"  // 范围
+	WHEN     = "满足" // 条件过滤
+	SKIP     = "跳过" // continue
+	BREAK    = "跳出" // break
 )
 
 // keywords 将中文关键字映射到词法单元类型
@@ -83,22 +83,22 @@ var keywords = map[string]TokenType{
 	"函数": FUNCTION,
 	"如果": IF,
 	"否则": ELSE,
-	"当":   WHILE,
+	"当":  WHILE,
 	"对于": FOR,
 	"返回": RETURN,
-	"真":   TRUE,
-	"假":   FALSE,
-	"空":   NULL,
+	"真":  TRUE,
+	"假":  FALSE,
+	"空":  NULL,
 	"并且": AND,
 	"或者": OR,
-	"非":   NOT,
+	"非":  NOT,
 	"导入": IMPORT,
-	"为":   AS,
+	"为":  AS,
 	"定义": DEFINE,
 	"执行": TRY,
 	"遇到": CATCH,
-	"在":   IN,
-	"到":   TO,
+	"在":  IN,
+	"到":  TO,
 	"满足": WHEN,
 	"跳过": SKIP,
 	"跳出": BREAK,

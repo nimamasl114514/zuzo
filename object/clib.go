@@ -20,21 +20,21 @@ const (
 type CFFIType int
 
 const (
-	CVoid    CFFIType = iota // void
-	CInt                     // int (int32)
-	CUInt                    // unsigned int (uint32)
-	CLong                    // long (int64 on 64-bit)
-	CULong                   // unsigned long
-	CLongLong                // long long (int64)
-	CFloat                   // float (float32)
-	CDouble                  // double (float64)
-	CChar                    // char (int8)
-	CUChar                   // unsigned char (uint8)
-	CShort                   // short (int16)
-	CUShort                  // unsigned short (uint16)
-	CBool                    // bool (int)
-	CPtr                     // void* (raw pointer, passed as uintptr)
-	CStr                     // const char* (C string, passed as Go string → C string)
+	CVoid     CFFIType = iota // void
+	CInt                      // int (int32)
+	CUInt                     // unsigned int (uint32)
+	CLong                     // long (int64 on 64-bit)
+	CULong                    // unsigned long
+	CLongLong                 // long long (int64)
+	CFloat                    // float (float32)
+	CDouble                   // double (float64)
+	CChar                     // char (int8)
+	CUChar                    // unsigned char (uint8)
+	CShort                    // short (int16)
+	CUShort                   // unsigned short (uint16)
+	CBool                     // bool (int)
+	CPtr                      // void* (raw pointer, passed as uintptr)
+	CStr                      // const char* (C string, passed as Go string → C string)
 )
 
 // CFFITypeName 返回 CFFIType 的可读名称（导出版本）
@@ -181,7 +181,7 @@ func (cl *CLib) Close() {
 type CFunc struct {
 	Lib        *CLib
 	Name       string
-	Addr       uintptr   // 函数地址
+	Addr       uintptr // 函数地址
 	ParamTypes []CFFIType
 	RetType    CFFIType
 }

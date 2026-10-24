@@ -19,10 +19,10 @@ import (
 
 // FingerprintEntry 记录一个 AST 节点的指纹及其位置信息
 type FingerprintEntry struct {
-	Fingerprint uint64     // 拓扑指纹
-	Node        Node       // 原始 AST 节点（用于二次验证）
-	Location    string    // 源码位置描述（如 "file.hy:10"）
-	NodeType    string     // 节点类型名（如 "InfixExpression"）
+	Fingerprint uint64 // 拓扑指纹
+	Node        Node   // 原始 AST 节点（用于二次验证）
+	Location    string // 源码位置描述（如 "file.hy:10"）
+	NodeType    string // 节点类型名（如 "InfixExpression"）
 }
 
 // FingerprintTable 拓扑指纹索引表
@@ -296,11 +296,11 @@ func (t *FingerprintTable) UniqueCount() int {
 
 // Stats 返回指纹表的统计信息
 type FingerprintStats struct {
-	TotalNodes    int // 总节点数
-	UniqueNodes   int // 唯一指纹数
-	DuplicateNodes int // 有重复的节点数（总 - 唯一）
+	TotalNodes      int // 总节点数
+	UniqueNodes     int // 唯一指纹数
+	DuplicateNodes  int // 有重复的节点数（总 - 唯一）
 	DuplicateGroups int // 重复组数
-	MaxGroupSize  int // 最大重复组大小
+	MaxGroupSize    int // 最大重复组大小
 }
 
 // Stats 返回指纹表的统计信息

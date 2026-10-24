@@ -680,7 +680,7 @@ func builtinGetFullText(args ...object.Object) object.Object {
 	return &object.String{Value: text}
 }
 
-// 清空输入(页面, 选择器) → 空 — 用原生 setter 清空输入框（对齐 Playwright el.fill('')）
+// 清空输入(页面, 选择器) → 空 — 用原生 setter 清空输入框（对齐 Playwright el.fill(”)）
 // 选择器支持 | 分隔多选择器
 func builtinClearInput(args ...object.Object) object.Object {
 	if len(args) != 2 {

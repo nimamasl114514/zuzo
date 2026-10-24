@@ -31,9 +31,9 @@ const (
 // 将原先分散在 precedences、prefixParseFns、infixParseFns 三处的信息合并为一条记录。
 // 新增运算符只需在此表中添加一行，无需修改多处 map。
 type OperatorDef struct {
-	Precedence int            // 中缀优先级（前缀优先级由前缀函数内部硬编码）
-	PrefixFn   prefixParseFn  // 前缀解析函数（可为 nil）
-	InfixFn    infixParseFn   // 中缀解析函数（可为 nil）
+	Precedence int           // 中缀优先级（前缀优先级由前缀函数内部硬编码）
+	PrefixFn   prefixParseFn // 前缀解析函数（可为 nil）
+	InfixFn    infixParseFn  // 中缀解析函数（可为 nil）
 }
 
 type (
@@ -70,41 +70,41 @@ func New(l *lexer.Lexer) *Parser {
 	// Precedence 为中缀优先级；仅前缀的 token 用 _LOWEST
 	p.operatorDefs = map[token.TokenType]OperatorDef{
 		// --- 仅前缀（字面量、标识符） ---
-		token.IDENT:     {PrefixFn: p.parseIdentifier},
-		token.INT:       {PrefixFn: p.parseIntegerLiteral},
-		token.FLOAT:     {PrefixFn: p.parseFloatLiteral},
-		token.STRING:    {PrefixFn: p.parseStringLiteral},
-		token.FSTRING:   {PrefixFn: p.parseFStringLiteral},
-		token.TRUE:      {PrefixFn: p.parseBooleanLiteral},
-		token.FALSE:     {PrefixFn: p.parseBooleanLiteral},
-		token.NULL:      {PrefixFn: p.parseNullLiteral},
-		token.LBRACKET:  {PrefixFn: p.parseArrayLiteral, InfixFn: p.parseIndexExpression, Precedence: _INDEX},
-		token.LBRACE:    {PrefixFn: p.parseHashLiteral},
-		token.IF:        {PrefixFn: p.parseIfExpression},
-		token.FUNCTION:  {PrefixFn: p.parseFunctionLiteral},
+		token.IDENT:    {PrefixFn: p.parseIdentifier},
+		token.INT:      {PrefixFn: p.parseIntegerLiteral},
+		token.FLOAT:    {PrefixFn: p.parseFloatLiteral},
+		token.STRING:   {PrefixFn: p.parseStringLiteral},
+		token.FSTRING:  {PrefixFn: p.parseFStringLiteral},
+		token.TRUE:     {PrefixFn: p.parseBooleanLiteral},
+		token.FALSE:    {PrefixFn: p.parseBooleanLiteral},
+		token.NULL:     {PrefixFn: p.parseNullLiteral},
+		token.LBRACKET: {PrefixFn: p.parseArrayLiteral, InfixFn: p.parseIndexExpression, Precedence: _INDEX},
+		token.LBRACE:   {PrefixFn: p.parseHashLiteral},
+		token.IF:       {PrefixFn: p.parseIfExpression},
+		token.FUNCTION: {PrefixFn: p.parseFunctionLiteral},
 
 		// --- 前缀 + 中缀（一元/二元 双角色） ---
-		token.MINUS:     {Precedence: _SUM,   PrefixFn: p.parsePrefixExpression, InfixFn: p.parseInfixExpression},
-		token.BANG:      {Precedence: _PREFIX, PrefixFn: p.parsePrefixExpression},
-		token.NOT:       {Precedence: _PREFIX, PrefixFn: p.parsePrefixExpression},
-		token.LPAREN:    {Precedence: _CALL,  PrefixFn: p.parseGroupedExpression, InfixFn: p.parseCallExpression},
+		token.MINUS:  {Precedence: _SUM, PrefixFn: p.parsePrefixExpression, InfixFn: p.parseInfixExpression},
+		token.BANG:   {Precedence: _PREFIX, PrefixFn: p.parsePrefixExpression},
+		token.NOT:    {Precedence: _PREFIX, PrefixFn: p.parsePrefixExpression},
+		token.LPAREN: {Precedence: _CALL, PrefixFn: p.parseGroupedExpression, InfixFn: p.parseCallExpression},
 
 		// --- 仅中缀（二元运算符） ---
-		token.ASSIGN:    {Precedence: _ASSIGN,      InfixFn: p.parseAssignExpression},
-		token.PLUS:      {Precedence: _SUM,         InfixFn: p.parseInfixExpression},
-		token.SLASH:     {Precedence: _PRODUCT,     InfixFn: p.parseInfixExpression},
-		token.ASTERISK:  {Precedence: _PRODUCT,     InfixFn: p.parseInfixExpression},
-		token.PERCENT:   {Precedence: _PRODUCT,     InfixFn: p.parseInfixExpression},
-		token.EQ:        {Precedence: _EQUALS,      InfixFn: p.parseInfixExpression},
-		token.NEQ:       {Precedence: _EQUALS,      InfixFn: p.parseInfixExpression},
-		token.LT:        {Precedence: _LESSGREATER, InfixFn: p.parseInfixExpression},
-		token.GT:        {Precedence: _LESSGREATER, InfixFn: p.parseInfixExpression},
-		token.LTE:       {Precedence: _LESSGREATER, InfixFn: p.parseInfixExpression},
-		token.GTE:       {Precedence: _LESSGREATER, InfixFn: p.parseInfixExpression},
-		token.AND:       {Precedence: _AND,         InfixFn: p.parseInfixExpression},
-		token.OR:        {Precedence: _OR,          InfixFn: p.parseInfixExpression},
-		token.ELSE:      {Precedence: _FALLBACK,    InfixFn: p.parseInfixExpression}, // 否则 fallback
-		token.DOT:       {Precedence: _INDEX,       InfixFn: p.parseMemberExpression},
+		token.ASSIGN:   {Precedence: _ASSIGN, InfixFn: p.parseAssignExpression},
+		token.PLUS:     {Precedence: _SUM, InfixFn: p.parseInfixExpression},
+		token.SLASH:    {Precedence: _PRODUCT, InfixFn: p.parseInfixExpression},
+		token.ASTERISK: {Precedence: _PRODUCT, InfixFn: p.parseInfixExpression},
+		token.PERCENT:  {Precedence: _PRODUCT, InfixFn: p.parseInfixExpression},
+		token.EQ:       {Precedence: _EQUALS, InfixFn: p.parseInfixExpression},
+		token.NEQ:      {Precedence: _EQUALS, InfixFn: p.parseInfixExpression},
+		token.LT:       {Precedence: _LESSGREATER, InfixFn: p.parseInfixExpression},
+		token.GT:       {Precedence: _LESSGREATER, InfixFn: p.parseInfixExpression},
+		token.LTE:      {Precedence: _LESSGREATER, InfixFn: p.parseInfixExpression},
+		token.GTE:      {Precedence: _LESSGREATER, InfixFn: p.parseInfixExpression},
+		token.AND:      {Precedence: _AND, InfixFn: p.parseInfixExpression},
+		token.OR:       {Precedence: _OR, InfixFn: p.parseInfixExpression},
+		token.ELSE:     {Precedence: _FALLBACK, InfixFn: p.parseInfixExpression}, // 否则 fallback
+		token.DOT:      {Precedence: _INDEX, InfixFn: p.parseMemberExpression},
 	}
 
 	// 读取前两个词法单元

@@ -79,24 +79,28 @@ func (c *Context) PopFrame() {
 }
 
 // Get 按 De Bruijn 索引获取值——O(1) 数组索引，无 Map 查找，无链表遍历
+//
 //go:inline
 func (c *Context) Get(depth, slot int) Value {
 	return c.frames[c.sp-depth].slots[slot]
 }
 
 // Set 按 De Bruijn 索引设置值
+//
 //go:inline
 func (c *Context) Set(depth, slot int, val Value) {
 	c.frames[c.sp-depth].slots[slot] = val
 }
 
 // GetSmi 便捷方法：获取 Smi 值并直接解码为 int64
+//
 //go:inline
 func (c *Context) GetSmi(depth, slot int) int64 {
 	return c.frames[c.sp-depth].slots[slot].AsSmi()
 }
 
 // SetSmi 便捷方法：将 int64 编码为 Smi 并存储
+//
 //go:inline
 func (c *Context) SetSmi(depth, slot int, val int64) {
 	c.frames[c.sp-depth].slots[slot] = Smi(val)

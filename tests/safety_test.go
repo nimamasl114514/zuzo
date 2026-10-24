@@ -49,10 +49,10 @@ func evalBoth(input string) diffResult {
 	evaluator.SetSAPCompiler(oldSAP)
 
 	return diffResult{
-		sapOut: sapRes.Inspect(),
-		sapErr:    isErrObject(sapRes),
-		slowOut:   slowRes.Inspect(),
-		slowErr:   isErrObject(slowRes),
+		sapOut:  sapRes.Inspect(),
+		sapErr:  isErrObject(sapRes),
+		slowOut: slowRes.Inspect(),
+		slowErr: isErrObject(slowRes),
 	}
 }
 
@@ -206,7 +206,7 @@ func TestSafetyVerifierReport(t *testing.T) {
 	}
 
 	// 拒绝记录：含函数调用的表达式必须被显式拒绝
-last := program.Statements[len(program.Statements)-1].(*ast.ExpressionStatement)
+	last := program.Statements[len(program.Statements)-1].(*ast.ExpressionStatement)
 	res, ok := last.Expression.(*ast.InfixExpression)
 	if !ok {
 		t.Fatal("期望最后一条为 infix 表达式")
