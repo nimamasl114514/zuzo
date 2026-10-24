@@ -1,3 +1,5 @@
+//go:build cgo
+
 package object
 
 // clib_call.go — C 函数指针调用器

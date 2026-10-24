@@ -20,6 +20,12 @@ package runtime
 //     break/continue、嵌套循环、global/nonlocal 声明 → 不匹配
 //   - 变量初值必须已存在且是 int；缺失或是其他类型 → 不匹配
 //   - 预计迭代次数 < 1000 → 不匹配（不值得付编译成本）
+//
+// 溢出安全（第 10 轮补）：原生路径全程 int64 裸运算，而 Python int 是任意精度。
+// 因此每步运算都累计溢出标记（无分支位运算，热路径不增加跳转），循环退出时：
+//   - 无溢出 → 正常写回 Env
+//   - 有溢出 → 恢复循环入口的变量值，返回 false 撤出原生路径，由原解释路径重跑，
+//     解释器会按 Python 语义提升到 big.Int。绝不静默回绕。
 
 import (
 	"strconv"
@@ -59,6 +65,42 @@ type pyNativeLoop struct {
 	step     int64
 }
 
+// pyMinInt64 int64 最小值（避免为此引入 math 包）
+const pyMinInt64 = -1 << 63
+
+// pyAddOverflow 返回 a+b 是否溢出 int64（无分支：0=未溢出，1=溢出）
+// 原理：同号相加时，若结果符号与任一操作数符号不同即溢出。
+func pyAddOverflow(a, b int64) uint64 {
+	r := a + b
+	return uint64((a^r)&(b^r)) >> 63
+}
+
+// pySubOverflow 返回 a-b 是否溢出 int64（无分支：0=未溢出，1=溢出）
+// 原理：异号相减时，若结果符号与被减数符号不同即溢出。
+func pySubOverflow(a, b int64) uint64 {
+	r := a - b
+	return uint64((a^b)&(a^r)) >> 63
+}
+
+// pyMulOverflow 返回 a*b 是否溢出 int64（0=未溢出，1=溢出）
+// 乘法不在热路径上（基准循环只有 + ），用除法回验即可，边界单独处理。
+func pyMulOverflow(a, b int64) uint64 {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	if a == -1 && b == pyMinInt64 {
+		return 1
+	}
+	if b == -1 && a == pyMinInt64 {
+		return 1
+	}
+	r := a * b
+	if r/b != a {
+		return 1
+	}
+	return 0
+}
+
 // maxNativeVars 原生循环支持的变量数上限（超过就放弃，避免线性扫描成本）
 const maxNativeVars = 12
 
@@ -86,6 +128,10 @@ func (ip *Interp) tryNativeWhile(node *ast.While, env *object.Env) (object.Objec
 		vals[i] = iv.V
 	}
 
+	// 循环入口快照：溢出回退时按此恢复 Env（循环体只会写 loop.names，恢复即等价于未执行）
+	initVals := make([]int64, len(vals))
+	copy(initVals, vals)
+
 	iVal := vals[loop.loopIdx]
 
 	// 估算迭代次数，太小则放弃（编译与写回成本不划算）
@@ -94,6 +140,8 @@ func (ip *Interp) tryNativeWhile(node *ast.While, env *object.Env) (object.Objec
 	}
 
 	ops := loop.ops
+	// ovf 累计循环体内的 int64 溢出（无分支，只在循环退出时判断一次）
+	var ovf uint64
 	for {
 		switch loop.condOp {
 		case "<":
@@ -117,11 +165,20 @@ func (ip *Interp) tryNativeWhile(node *ast.While, env *object.Env) (object.Objec
 		for _, op := range ops {
 			switch op.kind {
 			case pyOpAdd:
-				vals[op.dst] = operand(op.a, op.c, vals) + operand(op.b, op.c, vals)
+				x := operand(op.a, op.c, vals)
+				y := operand(op.b, op.c, vals)
+				ovf |= pyAddOverflow(x, y)
+				vals[op.dst] = x + y
 			case pyOpSub:
-				vals[op.dst] = operand(op.a, op.c, vals) - operand(op.b, op.c, vals)
+				x := operand(op.a, op.c, vals)
+				y := operand(op.b, op.c, vals)
+				ovf |= pySubOverflow(x, y)
+				vals[op.dst] = x - y
 			case pyOpMul:
-				vals[op.dst] = operand(op.a, op.c, vals) * operand(op.b, op.c, vals)
+				x := operand(op.a, op.c, vals)
+				y := operand(op.b, op.c, vals)
+				ovf |= pyMulOverflow(x, y)
+				vals[op.dst] = x * y
 			case pyOpSetConst:
 				vals[op.dst] = op.c
 			case pyOpSetVar:
@@ -129,15 +186,32 @@ func (ip *Interp) tryNativeWhile(node *ast.While, env *object.Env) (object.Objec
 			}
 		}
 
+		// 计数器是条件的唯一输入，必须精确：一旦溢出立即退出原生路径
+		// （否则回绕后的 iVal 可能让条件永远成立，变成死循环）
 		if loop.updateOp == "+" {
+			if pyAddOverflow(iVal, loop.step) != 0 {
+				ovf = 1
+				goto done
+			}
 			iVal += loop.step
 		} else {
+			if pySubOverflow(iVal, loop.step) != 0 {
+				ovf = 1
+				goto done
+			}
 			iVal -= loop.step
 		}
 		vals[loop.loopIdx] = iVal
 	}
 
 done:
+	if ovf != 0 {
+		// 溢出回退：恢复循环入口状态，交还原解释路径重跑（解释器走 big.Int，结果精确）
+		for i, name := range loop.names {
+			env.Set(name, object.NewInt(initVals[i]))
+		}
+		return nil, false
+	}
 	// 写回环境（Int 对象按需新建；小整数走 object 缓存由 NewInt 负责）
 	for i, name := range loop.names {
 		env.Set(name, object.NewInt(vals[i]))

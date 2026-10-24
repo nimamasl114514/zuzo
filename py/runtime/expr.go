@@ -358,8 +358,12 @@ func (ip *Interp) runComp(gens []ast.Comp, idx int, env *object.Env, body func(e
 			break
 		}
 		// 每轮迭代新建环境（Python 3 推导式作用域）
-		inner := object.NewEnv(env)
-		inner.Globals = env.Globals
+		// 首层复用推导式自身作用域，使海象运算符 := 的结果在各轮之间可见（CPython 语义）
+		inner := env
+		if idx > 0 {
+			inner = object.NewEnv(env)
+			inner.Globals = env.Globals
+		}
 		ip.assign(g.Target, v, inner)
 		pass := true
 		for _, cond := range g.Ifs {
@@ -379,9 +383,12 @@ func (ip *Interp) evalListComp(n *ast.ListComp, env *object.Env) object.Object {
 	out := &object.List{}
 	scope := object.NewEnv(env)
 	scope.Globals = env.Globals
+	var wal *object.Env
 	ip.runComp(n.Gens, 0, scope, func(e *object.Env) {
+		wal = e
 		out.Items = append(out.Items, ip.evalExpr(n.Elt, e))
 	})
+	ip.compWalrus(n.Gens, wal, env)
 	return out
 }
 
@@ -389,13 +396,16 @@ func (ip *Interp) evalSetComp(n *ast.SetComp, env *object.Env) object.Object {
 	out := &object.Set{}
 	scope := object.NewEnv(env)
 	scope.Globals = env.Globals
+	var wal *object.Env
 	ip.runComp(n.Gens, 0, scope, func(e *object.Env) {
+		wal = e
 		v := ip.evalExpr(n.Elt, e)
 		if _, ok := object.Hash(v); !ok {
 			ip.TypeError("unhashable type: '%s'", object.TypeName(v))
 		}
 		out.Add(v)
 	})
+	ip.compWalrus(n.Gens, wal, env)
 	return out
 }
 
@@ -403,13 +413,16 @@ func (ip *Interp) evalDictComp(n *ast.DictComp, env *object.Env) object.Object {
 	out := &object.Dict{}
 	scope := object.NewEnv(env)
 	scope.Globals = env.Globals
+	var wal *object.Env
 	ip.runComp(n.Gens, 0, scope, func(e *object.Env) {
+		wal = e
 		k := ip.evalExpr(n.Key, e)
 		if _, ok := object.Hash(k); !ok {
 			ip.TypeError("unhashable type: '%s'", object.TypeName(k))
 		}
 		out.Set(k, ip.evalExpr(n.Value, e))
 	})
+	ip.compWalrus(n.Gens, wal, env)
 	return out
 }
 
@@ -642,10 +655,27 @@ func containsYield(stmts []ast.Stmt) bool {
 			for _, b := range n.Body {
 				walkStmt(b)
 			}
+			for _, b := range n.Orelse {
+				walkStmt(b)
+			}
 		case *ast.For:
 			walkExpr(n.Iter)
 			for _, b := range n.Body {
 				walkStmt(b)
+			}
+			for _, b := range n.Orelse {
+				walkStmt(b)
+			}
+		case *ast.Match:
+			walkExpr(n.Subject)
+			for _, c := range n.Cases {
+				if c == nil {
+					continue
+				}
+				walkExpr(c.Guard)
+				for _, b := range c.Body {
+					walkStmt(b)
+				}
 			}
 		case *ast.Return:
 			walkExpr(n.Value)
@@ -654,9 +684,19 @@ func containsYield(stmts []ast.Stmt) bool {
 				walkStmt(b)
 			}
 			for _, h := range n.Handlers {
+				if h == nil {
+					continue
+				}
+				walkExpr(h.Type)
 				for _, b := range h.Body {
 					walkStmt(b)
 				}
+			}
+			for _, b := range n.Orelse {
+				walkStmt(b)
+			}
+			for _, b := range n.Finally {
+				walkStmt(b)
 			}
 		case *ast.With:
 			for _, it := range n.Items {
@@ -667,8 +707,14 @@ func containsYield(stmts []ast.Stmt) bool {
 			}
 		case *ast.Raise:
 			walkExpr(n.Exc)
+			walkExpr(n.Cause)
 		case *ast.Assert:
 			walkExpr(n.Test)
+			walkExpr(n.Msg)
+		case *ast.Del:
+			for _, t := range n.Targets {
+				walkExpr(t)
+			}
 		}
 	}
 	for _, s := range stmts {

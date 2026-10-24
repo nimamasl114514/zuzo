@@ -344,6 +344,10 @@ func (ip *Interp) execWhile(node *ast.While, env *object.Env) {
 }
 
 func (ip *Interp) execFor(node *ast.For, env *object.Env) {
+	if node.IsAsync {
+		ip.execAsyncFor(node, env)
+		return
+	}
 	iter := ip.Iter(ip.evalExpr(node.Iter, env))
 	for {
 		v, ok := ip.IterNext(iter)
@@ -357,6 +361,124 @@ func (ip *Interp) execFor(node *ast.For, env *object.Env) {
 		}
 	}
 	ip.execBlock(node.Orelse, env)
+}
+
+// execAsyncFor 执行 async for（CPython 语义）：
+//
+//	aiter = iterable.__aiter__()
+//	while True:
+//	    try: value = await aiter.__anext__()
+//	    except StopAsyncIteration: break
+//	    target = value; body
+//	else: orelse
+func (ip *Interp) execAsyncFor(node *ast.For, env *object.Env) {
+	aiter := ip.getAsyncIter(ip.evalExpr(node.Iter, env))
+	for {
+		v, ok := ip.asyncIterNext(aiter)
+		if !ok {
+			break
+		}
+		ip.assign(node.Target, v, env)
+		brk, _ := ip.execLoopBody(node.Body, env)
+		if brk {
+			return
+		}
+	}
+	ip.execBlock(node.Orelse, env)
+}
+
+// getAsyncIter 获取异步迭代器（等价于 CPython 的 GET_AITER）
+func (ip *Interp) getAsyncIter(o object.Object) object.Object {
+	switch v := o.(type) {
+	case *object.Generator:
+		// 本运行时的 async def 函数（含 async generator）即 Generator，自身即异步迭代器
+		return v
+	case *object.Instance:
+		m, ok := ip.findDunder(v.Class, "__aiter__")
+		if !ok {
+			break
+		}
+		// CPython 3.7+：__aiter__ 必须直接返回异步迭代器（不再 await）
+		r := ip.Call(ip.bindMethod(v, m), nil, nil)
+		if ip.isAsyncIterator(r) {
+			return r
+		}
+		ip.TypeError("__aiter__ returned non-async-iterator (type %s)", object.TypeName(r))
+	}
+	ip.TypeError("'async for' requires an object with __aiter__ method, got %s", object.TypeName(o))
+	return nil
+}
+
+// isAsyncIterator 判断对象是否具备 __anext__ 协议
+func (ip *Interp) isAsyncIterator(o object.Object) bool {
+	switch v := o.(type) {
+	case *object.Generator:
+		return true
+	case *object.Instance:
+		_, ok := ip.findDunder(v.Class, "__anext__")
+		return ok
+	}
+	return false
+}
+
+// asyncIterNext 推进异步迭代器（等价于 GET_ANEXT + SEND + 捕获 StopAsyncIteration）
+func (ip *Interp) asyncIterNext(it object.Object) (object.Object, bool) {
+	switch v := it.(type) {
+	case *object.Generator:
+		// 原生 async generator：Next 已把 await 内部驱动完
+		val, done, err := v.Next()
+		if err != nil {
+			if pe, ok := err.(*PyError); ok {
+				if ip.isStopAsyncIteration(pe.Exc) {
+					return nil, false
+				}
+				panic(pe)
+			}
+			ip.RuntimeErr("%v", err)
+		}
+		if done {
+			return nil, false
+		}
+		return val, true
+	case *object.Instance:
+		m, ok := ip.findDunder(v.Class, "__anext__")
+		if !ok {
+			break
+		}
+		var val object.Object
+		pending := ip.protect(func() {
+			val = ip.awaitValue(ip.Call(ip.bindMethod(v, m), nil, nil))
+		})
+		if pending != nil {
+			if ip.isStopAsyncIteration(pending.Exc) {
+				return nil, false
+			}
+			if pending.Exc != nil && pending.Exc.Class.Name == "StopIteration" {
+				ip.RuntimeErr("coroutine raised StopIteration")
+			}
+			ip.RaiseObj(pending.Exc)
+		}
+		return val, true
+	}
+	ip.TypeError("'%s' object is not an async iterator", object.TypeName(it))
+	return nil, false
+}
+
+// isStopAsyncIteration 判断异常是否为 StopAsyncIteration（含子类）
+func (ip *Interp) isStopAsyncIteration(e *object.Exception) bool {
+	if e == nil || e.Class == nil {
+		return false
+	}
+	for c := e.Class; c != nil; {
+		if c.Name == "StopAsyncIteration" {
+			return true
+		}
+		if len(c.Bases) == 0 {
+			break
+		}
+		c = c.Bases[0]
+	}
+	return false
 }
 
 // execLoopBody 执行循环体，返回 (是否 break)
@@ -462,9 +584,32 @@ func (ip *Interp) execRaise(node *ast.Raise, env *object.Env) {
 }
 
 func (ip *Interp) execWith(node *ast.With, env *object.Env) {
+	if node.IsAsync {
+		ip.execAsyncWithItems(node.Items, node.Body, env)
+		return
+	}
 	ip.execWithItems(node.Items, node.Body, env)
 }
 
+// lookupSpecialMethod 按 CPython 语义查找特殊方法：在类型上查找（绕过实例字典），
+// 绑定实例后返回；本地原生对象按类型字典查找。
+func (ip *Interp) lookupSpecialMethod(o object.Object, name string) (object.Object, bool) {
+	if inst, ok := o.(*object.Instance); ok {
+		if m, ok := ip.findDunder(inst.Class, name); ok {
+			return ip.bindMethod(inst, m), true
+		}
+		return nil, false
+	}
+	if cls := o.Type(); cls != nil {
+		if m, ok := ip.findDunder(cls, name); ok {
+			return ip.bindMethod(o, m), true
+		}
+	}
+	return nil, false
+}
+
+// execWithItems 执行同步 with（多项按 CPython 语义嵌套展开：外层先 enter，
+// 退出时内层先 exit；内层抑制异常则外层收到 None）。
 func (ip *Interp) execWithItems(items []ast.WithItem, body []ast.Stmt, env *object.Env) {
 	if len(items) == 0 {
 		ip.execBlock(body, env)
@@ -472,8 +617,15 @@ func (ip *Interp) execWithItems(items []ast.WithItem, body []ast.Stmt, env *obje
 	}
 	item := items[0]
 	ctx := ip.evalExpr(item.Context, env)
-	enter := ip.GetAttr(ctx, "__enter__")
-	exit := ip.GetAttr(ctx, "__exit__")
+	// CPython 顺序：先查 __exit__，再查 __enter__，再调用 __enter__
+	exit, ok := ip.lookupSpecialMethod(ctx, "__exit__")
+	if !ok {
+		ip.TypeError("'%s' object does not support the context manager protocol (missed __exit__ method)", object.TypeName(ctx))
+	}
+	enter, ok := ip.lookupSpecialMethod(ctx, "__enter__")
+	if !ok {
+		ip.TypeError("'%s' object does not support the context manager protocol", object.TypeName(ctx))
+	}
 	val := ip.Call(enter, nil, nil)
 	if item.Vars != nil {
 		ip.assign(item.Vars, val, env)
@@ -481,11 +633,56 @@ func (ip *Interp) execWithItems(items []ast.WithItem, body []ast.Stmt, env *obje
 	pending := ip.protect(func() {
 		ip.execWithItems(items[1:], body, env)
 	})
-	var excObj object.Object = object.None
+	// CPython 无异常时传 (None, None, None)
+	var excTypeObj, excObj object.Object = object.None, object.None
 	if pending != nil {
+		excTypeObj = pending.Exc.Type()
 		excObj = pending.Exc
 	}
-	res := ip.Call(exit, []object.Object{excObj.Type(), excObj, object.None}, nil)
+	res := ip.Call(exit, []object.Object{excTypeObj, excObj, object.None}, nil)
+	if pending != nil && !object.Truthy(res) {
+		ip.RaiseObj(pending.Exc)
+	}
+}
+
+// execAsyncWithItems 执行 async with（CPython 语义）：
+//
+//	aexit = type(mgr).__aexit__; aenter = type(mgr).__aenter__
+//	value = await aenter(mgr)
+//	try: body
+//	except BaseException as e: await aexit(type(e), e, None) → 假值则继续抛
+//	else: await aexit(None, None, None)
+//
+// 多项时同样按嵌套展开：外层先 aenter，退出时内层先 aexit。
+func (ip *Interp) execAsyncWithItems(items []ast.WithItem, body []ast.Stmt, env *object.Env) {
+	if len(items) == 0 {
+		ip.execBlock(body, env)
+		return
+	}
+	item := items[0]
+	ctx := ip.evalExpr(item.Context, env)
+	// CPython 顺序：先查 __aenter__（缺失报通用提示），再查 __aexit__（带 missed 提示）
+	aenter, ok := ip.lookupSpecialMethod(ctx, "__aenter__")
+	if !ok {
+		ip.TypeError("'%s' object does not support the asynchronous context manager protocol", object.TypeName(ctx))
+	}
+	aexit, ok := ip.lookupSpecialMethod(ctx, "__aexit__")
+	if !ok {
+		ip.TypeError("'%s' object does not support the asynchronous context manager protocol (missed __aexit__ method)", object.TypeName(ctx))
+	}
+	val := ip.awaitValue(ip.Call(aenter, nil, nil))
+	if item.Vars != nil {
+		ip.assign(item.Vars, val, env)
+	}
+	pending := ip.protect(func() {
+		ip.execAsyncWithItems(items[1:], body, env)
+	})
+	var excTypeObj, excObj object.Object = object.None, object.None
+	if pending != nil {
+		excTypeObj = pending.Exc.Type()
+		excObj = pending.Exc
+	}
+	res := ip.awaitValue(ip.Call(aexit, []object.Object{excTypeObj, excObj, object.None}, nil))
 	if pending != nil && !object.Truthy(res) {
 		ip.RaiseObj(pending.Exc)
 	}

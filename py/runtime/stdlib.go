@@ -43,6 +43,7 @@ func registerBuiltinModules(ip *Interp) {
 	builtinModuleInits["dataclasses"] = modDataclasses
 	builtinModuleInits["asyncio"] = modAsyncio
 	registerStdlib2(ip)
+	registerStdlib4(ip)
 }
 
 // newModule 创建模块

@@ -15,8 +15,58 @@ package evaluator
 
 import (
 	"zuzo/ast"
+	"zuzo/diagnostic"
 	"zuzo/object"
 )
+
+// ================================================================
+// 溢出安全边界（第 10 轮补）
+// ================================================================
+//
+// De Bruijn 原生循环全程用 int64 裸运算 + Smi 编码，而 Smi 只有 63 位有符号
+// （n<<1|1，有效区间 [-2^62, 2^62-1]）。超出这个区间时 Smi 编码会静默回绕
+// （例如 2^62 → -2^62），与普通 *object.Integer 路径结果不一致。
+//
+// 两级处理，绝不静默回绕：
+//  1. 结果超出 Smi 区间但仍在 int64 内：撤出原生路径，把整条 for 语句交回
+//     普通整数对象路径（evalForStatement，*object.Integer 保存 int64）重跑；
+//  2. 结果连 int64 都装不下：抛 E210 整数溢出错误（对象路也装不下，不静默回绕）。
+
+const (
+	dbSmiMin = -(int64(1) << 62)
+	dbSmiMax = int64(1)<<62 - 1
+)
+
+// dbSmiFits 判断 int64 是否能无损编码为 Smi
+//
+//go:inline
+func dbSmiFits(v int64) bool { return v >= dbSmiMin && v <= dbSmiMax }
+
+// dbAddOverflow 返回 a+b 是否溢出 int64（无分支：0=未溢出，1=溢出）
+func dbAddOverflow(a, b int64) uint64 {
+	r := a + b
+	return uint64((a^r)&(b^r)) >> 63
+}
+
+// dbSubOverflow 返回 a-b 是否溢出 int64（无分支：0=未溢出，1=溢出）
+func dbSubOverflow(a, b int64) uint64 {
+	r := a - b
+	return uint64((a^b)&(a^r)) >> 63
+}
+
+// dbMulOverflow 返回 a*b 是否溢出 int64（0=未溢出，1=溢出）
+func dbMulOverflow(a, b int64) uint64 {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	if (a == -1 && b == -1<<63) || (b == -1 && a == -1<<63) {
+		return 1
+	}
+	if a*b/b != a {
+		return 1
+	}
+	return 0
+}
 
 // ================================================================
 // 第一部分：De Bruijn 索引解析器
@@ -322,10 +372,19 @@ func (c *SAPCompiler) tryCompileForDeBruijnNative(n *ast.ForStatement) CompileFu
 			copy(ctxSlots, envSlots)
 		}
 
+		// 边界/步长常量本身超出 Smi 区间：不入原生路径，直接交回普通整数对象路径
+		if !dbSmiFits(initVal) || !dbSmiFits(condVal) || !dbSmiFits(stepVal) {
+			return evalForStatement(n, env)
+		}
+
 		// Init: 循环变量编码为 Smi 写入 Context
 		iVal := initVal
 		ctx.SetSmi(0, loopSlot, iVal)
 
+		escape := false          // Smi 装不下，回退普通整数对象路径
+		var errObj object.Object // int64 也装不下时的显式错误
+
+	loop:
 		for {
 			// Condition: 直接 int64 比较（iVal 在寄存器中）
 			shouldBreak := false
@@ -349,44 +408,97 @@ func (c *SAPCompiler) tryCompileForDeBruijnNative(n *ast.ForStatement) CompileFu
 			// 对比 Level 4: env.GetValueSlot → 指针解引用 → 数组索引
 			// Level 5: ctx.Get → 数组索引 → 数组索引（连续内存，无指针解引用）
 			for _, op := range dbOps {
+				// 先算出 int64 结果并累计溢出标记，再做 Smi 区间判定：
+				// 溢出 → 显式 E210 错误；超 Smi 区间 → 撤出原生路径
+				var res int64
+				var ovf uint64
 				switch op.kind {
-				case opAdd:
+				case opAdd, opAddConst:
 					v1 := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
-					v2 := ctx.Get(op.srcIdx2.Depth, op.srcIdx2.Slot).AsSmi()
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, v1+v2)
-				case opSub:
+					if op.kind == opAdd {
+						v2 := ctx.Get(op.srcIdx2.Depth, op.srcIdx2.Slot).AsSmi()
+						res = v1 + v2
+						ovf = dbAddOverflow(v1, v2)
+					} else {
+						res = v1 + op.constVal
+						ovf = dbAddOverflow(v1, op.constVal)
+					}
+				case opSub, opSubConst:
 					v1 := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
-					v2 := ctx.Get(op.srcIdx2.Depth, op.srcIdx2.Slot).AsSmi()
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, v1-v2)
-				case opMul:
+					if op.kind == opSub {
+						v2 := ctx.Get(op.srcIdx2.Depth, op.srcIdx2.Slot).AsSmi()
+						res = v1 - v2
+						ovf = dbSubOverflow(v1, v2)
+					} else {
+						res = v1 - op.constVal
+						ovf = dbSubOverflow(v1, op.constVal)
+					}
+				case opMul, opMulConst:
 					v1 := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
-					v2 := ctx.Get(op.srcIdx2.Depth, op.srcIdx2.Slot).AsSmi()
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, v1*v2)
-				case opAddConst:
-					v1 := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, v1+op.constVal)
-				case opSubConst:
-					v1 := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, v1-op.constVal)
-				case opMulConst:
-					v1 := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, v1*op.constVal)
+					if op.kind == opMul {
+						v2 := ctx.Get(op.srcIdx2.Depth, op.srcIdx2.Slot).AsSmi()
+						res = v1 * v2
+						ovf = dbMulOverflow(v1, v2)
+					} else {
+						res = v1 * op.constVal
+						ovf = dbMulOverflow(v1, op.constVal)
+					}
 				case opAssignConst:
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, op.constVal)
+					res = op.constVal
 				case opAssignVar:
+					// 直接拷贝 Value：源值本来就已落在 Smi 区间内
 					srcVal := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot)
-					ctx.Set(op.destIdx.Depth, op.destIdx.Slot, srcVal) // 直接拷贝 Value
+					ctx.Set(op.destIdx.Depth, op.destIdx.Slot, srcVal)
+					continue
 				}
+				if ovf != 0 {
+					errObj = newErrorWithNode(n, diagnostic.ErrIntegerOverflow.Code,
+						"循环体整数运算溢出：结果超出 int64 表示范围")
+					break loop
+				}
+				if !dbSmiFits(res) {
+					escape = true
+					break loop
+				}
+				ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, res)
 			}
 
 			// Update: 直接 int64 运算（iVal 在寄存器中）
+			// 计数器是条件的唯一输入，必须精确；一旦越界立即撤离原生路径，避免死循环
 			switch updateOp {
 			case "+":
+				if dbAddOverflow(iVal, stepVal) != 0 {
+					errObj = newErrorWithNode(n, diagnostic.ErrIntegerOverflow.Code,
+						"循环计数器溢出：结果超出 int64 表示范围")
+					break loop
+				}
 				iVal += stepVal
 			case "-":
+				if dbSubOverflow(iVal, stepVal) != 0 {
+					errObj = newErrorWithNode(n, diagnostic.ErrIntegerOverflow.Code,
+						"循环计数器溢出：结果超出 int64 表示范围")
+					break loop
+				}
 				iVal -= stepVal
 			}
+			if !dbSmiFits(iVal) {
+				escape = true
+				break loop
+			}
 			ctx.SetSmi(0, loopSlot, iVal)
+		}
+
+		if errObj != nil {
+			return errObj
+		}
+		if escape {
+			// 回退普通整数对象路径：原生路径只写 Context，Environment 仍是循环前状态。
+			// 先把 Context 帧恢复成入口快照（valueSlots 在原生路径期间未被改写），
+			// 再把整条 for 语句交给 evalForStatement 用 *object.Integer 重跑。
+			if envSlots := env.GetValueSlots(); len(envSlots) > 0 {
+				copy(ctx.CurrentFrame(), envSlots)
+			}
+			return evalForStatement(n, env)
 		}
 
 		// 循环退出：将 Context 值同步回 Environment（供后续非 SAP 路径使用）
