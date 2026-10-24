@@ -1,0 +1,18 @@
+// m07 综合：zuzo 驱动 + Python 提供算法
+##PY
+import re
+
+def 分词(文本):
+    return re.findall(r"[\w']+", 文本.lower())
+
+def 计数(词表):
+    d = {}
+    for w in 词表:
+        d[w] = d.get(w, 0) + 1
+    return d
+##ZUZO
+变量 文本 = "the quick brown fox jumps over the lazy dog the end"
+变量 词表 = py调用("分词", 文本)
+变量 结果 = py调用("计数", 词表)
+打印("词数 =", 长度(词表))
+打印("result =", 结果)

@@ -1,0 +1,10 @@
+// m06 错误行号：Python 异常定位到原文件行
+##PY
+print("第 2 行正常")
+##ZUZO
+打印("第 4 行正常")
+##PY
+def 炸():
+    raise ValueError("炸了")
+
+炸()

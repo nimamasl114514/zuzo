@@ -1,0 +1,57 @@
+# ===== 可执行产物 =====
+zuzo.exe
+zpm.exe
+*.exe
+
+# ===== 密钥与凭据（禁止入库）=====
+keys.txt
+teamorouter-keys.json
+*keys*.json
+
+# ===== 运行日志与临时数据 =====
+server*.log
+*.log
+tasks_data.txt
+分析报告.txt
+
+# ===== 开发期截图 / 临时图片 =====
+/*.png
+/test_screenshot.png
+/debug_email.png
+/example_screenshot.png
+
+# ===== WASM 构建产物（可由 rust_module 源码重建）=====
+/math.wasm
+/rust_math.wasm
+
+# ===== 跨语言基准构建产物 =====
+bench/BenchMulti.class
+*.class
+*.pdb
+
+# ===== 测试运行产物 =====
+tests_py/_out/
+tests_py/_tmp/
+tests_py/__pycache__/
+tests_mix/_out/
+**/__pycache__/
+
+# ===== 本地临时目录 / profile =====
+tmp/
+.rundata/
+*.prof
+
+# ===== 备份文件 =====
+*.bak
+*.bak-*
+*.orig
+
+# ===== 编辑器 / 系统 =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ===== 基准生成物（每次运行重建）=====
+bench/mix/_tmp_*
+bench/mix/_sync_*

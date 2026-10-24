@@ -1,0 +1,2 @@
+tests_mix/m10_edge_leadcode.hypy: 第 1 行：首个块标记（##ZUZO / ##PY）之前不允许出现代码
+rc=1

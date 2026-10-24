@@ -1,0 +1,5 @@
+﻿// CRLF+BOM 测试
+##PY
+print('py ok')
+##ZUZO
+打印("zuzo ok")

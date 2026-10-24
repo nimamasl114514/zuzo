@@ -1,0 +1,5 @@
+{
+    "库": "collections",
+    "版本": "1.0.0",
+    "模块": ["stack", "queue", "list", "math_utils"]
+}

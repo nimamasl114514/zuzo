@@ -1,0 +1,17 @@
+// m08 双向写入 + 同名覆盖 + py 内部改值回流
+##PY
+x = 1
+def 加倍(n):
+    return n * 2
+##ZUZO
+打印("初始 x =", x)
+变量 x = 2
+打印("zuzo 覆盖后 x =", x)
+py设置("y", 99)
+##PY
+print("py 看到 x =", x)
+print("py 看到 y =", y)
+x = 3
+##ZUZO
+打印("py 改回后 x =", x)
+打印("zuzo 调 py 加倍(21) =", py调用("加倍", 21))

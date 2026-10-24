@@ -1,0 +1,7 @@
+// m01 基础：块顺序执行 + 共享 stdout
+##PY
+print("py: 第一块")
+##ZUZO
+打印("zuzo: 第二块")
+##PY
+print("py: 第三块")

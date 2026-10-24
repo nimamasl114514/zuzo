@@ -1,0 +1,7 @@
+##PY
+总 = 0
+i = 0
+while i < N:
+    总 = 总 + i
+    i += 1
+print(总)

@@ -1,0 +1,10 @@
+// m03 zuzo 调用 Python 函数
+##PY
+def 加(a, b):
+    return a + b
+
+def 问候(名字):
+    return "你好, " + 名字
+##ZUZO
+打印("zuzo 调 py: 加(2,3) =", py调用("加", 2, 3))
+打印("zuzo 调 py: 问候 =", py调用("问候", "世界"))

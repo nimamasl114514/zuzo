@@ -1,0 +1,8 @@
+// m04 Python 调用 zuzo 函数
+##ZUZO
+函数 乘(a, b) {
+  返回 a * b
+}
+##PY
+print("py 调 zuzo: 乘(6,7) =", zuzo.调用("乘", 6, 7))
+print("py 取 zuzo 全局: zuzo.获取 不适用函数外变量 → 略")

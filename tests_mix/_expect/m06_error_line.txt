@@ -1,0 +1,7 @@
+第 2 行正常
+第 4 行正常
+Traceback (most recent call last):
+    File "tests_mix/m06_error_line.hypy", in 炸
+  第 8 行
+ValueError: 炸了
+rc=1
