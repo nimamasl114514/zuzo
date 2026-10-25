@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"fmt"
+	"os"
 	"strings"
 
 	"zuzo/py/ast"
@@ -34,6 +36,101 @@ func (ip *Interp) GetAttr(o object.Object, name string) object.Object {
 	if v, ok := ip.ctypesGetAttr(o, name); ok {
 		return v
 	}
+	// __doc__ 兜底：CPython 里任何对象都有 __doc__（无则 None）。
+	// email/_policybase.py:103 会对 bool 等原生值取 __doc__，缺了整条 email 链断。
+	if name == "__doc__" {
+		if inst, ok := o.(*object.Instance); ok {
+			if dv, has := inst.Dict["__doc__"]; has {
+				return dv
+			}
+			return object.None
+		}
+		if t, ok := o.(*object.TypeObj); ok {
+			if dv, has := t.Dict["__doc__"]; has {
+				return dv
+			}
+			return object.None
+		}
+		return object.None
+	}
+	// 原生容器类型的 dunder 兜底：_collections_abc 的 _check_methods 用 hasattr(C, '__xxx__')
+	// 判断 ABC 兼容性，缺这些会让 register/isinstance 判定失败。
+	if name == "__contains__" || name == "__len__" || name == "__iter__" || name == "__getitem__" {
+		isNativeContainer := false
+		switch o.(type) {
+		case *object.Set, *object.List, *object.Dict, *object.Str, *object.Tuple,
+			*object.Bytes, *object.ByteArray, *object.MemoryView, *object.Range:
+			isNativeContainer = true
+		}
+		if isNativeContainer {
+			self := o
+			n := name
+			return &object.Builtin{Name: n, Self: self, Fn: func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+				args := a
+				if len(args) > 0 && args[0] == self {
+					args = args[1:]
+				}
+				switch n {
+				case "__contains__":
+					if len(args) < 1 {
+						return object.FalseObj, nil
+					}
+					return object.GetBool(ip.Contains(self, args[0])), nil
+				case "__len__":
+					return &object.Int{V: int64(ip.Len(self))}, nil
+				case "__iter__":
+					return ip.Iter(self), nil
+				case "__getitem__":
+					if len(args) < 1 {
+						ip.TypeError("__getitem__ requires index")
+					}
+					return ip.GetItem(self, args[0]), nil
+				}
+				return object.None, nil
+			}}
+		}
+	}
+	// int.to_bytes（CPython 常用：协议序列化 / 长度前缀）
+	if iv, ok := o.(*object.Int); ok && name == "to_bytes" {
+		self := iv
+		return &object.Builtin{Name: "to_bytes", Self: self, Fn: func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			if len(a) < 2 {
+				ip.TypeError("to_bytes() requires length")
+			}
+			n, _ := object.AsInt(a[1])
+			order := "big"
+			if len(a) > 2 && a[2] != object.None {
+				order = a[2].Str()
+			}
+			signed := false
+			if len(a) > 3 {
+				signed = object.Truthy(a[3])
+			}
+			v := self.V
+			if v < 0 && !signed {
+				ip.raise(ip.excType("OverflowError"), "can't convert negative int to unsigned")
+			}
+			out := make([]byte, n)
+			uv := uint64(v)
+			for i := int64(0); i < n; i++ {
+				var b byte
+				if order == "little" {
+					b = byte(uv >> (8 * i))
+				} else {
+					b = byte(uv >> (8 * (n - 1 - i)))
+				}
+				out[i] = b
+			}
+			return &object.Bytes{V: out}, nil
+		}}
+	}
+	// bytearray / memoryview 原生方法
+	if v, ok := ip.byteArrayGetAttr(o, name); ok {
+		return v
+	}
+	if v, ok := ip.memoryViewGetAttr(o, name); ok {
+		return v
+	}
 	switch v := o.(type) {
 	case *object.Instance:
 		// 1. 实例字典
@@ -61,13 +158,65 @@ func (ip *Interp) GetAttr(o object.Object, name string) object.Object {
 		}
 		ip.AttrErr(o, name)
 	case *object.TypeObj:
+		// int.from_bytes（类方法）
+		if v == object.IntType && name == "from_bytes" {
+			return &object.Builtin{Name: "from_bytes", Fn: func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+				if len(a) == 0 {
+					ip.TypeError("from_bytes() requires bytes")
+				}
+				var data []byte
+				switch b := a[0].(type) {
+				case *object.Bytes:
+					data = b.V
+				case *object.ByteArray:
+					data = b.V
+				case *object.Str:
+					data = []byte(b.V)
+				}
+				order := "big"
+				if len(a) > 1 && a[1] != object.None {
+					order = a[1].Str()
+				}
+				var out uint64
+				if order == "little" {
+					for i := len(data) - 1; i >= 0; i-- {
+						out = out<<8 | uint64(data[i])
+					}
+				} else {
+					for _, b := range data {
+						out = out<<8 | uint64(b)
+					}
+				}
+				return &object.Int{V: int64(out)}, nil
+			}}
+		}
 		// 类属性
 		if m, ok := v.Lookup(name); ok {
 			return ip.bindClassAttr(v, nil, m)
 		}
+		// 元类属性（type(Cls).attr）：CPython 里类属性找不到会落到元类上，
+		// 如 ABCMeta.register / EnumType.__iter__ / 自定义 metaclass 的方法。
+		if v.MetaClass != nil && v.MetaClass != object.TypeType {
+			if m, ok := ip.findDunder(v.MetaClass, name); ok {
+				return ip.bindClassAttr(v.MetaClass, v, m)
+			}
+		}
 		switch name {
 		case "__name__":
 			return &object.Str{V: v.Name}
+		case "__qualname__":
+			return &object.Str{V: v.Name}
+		case "__module__":
+			if mv, ok := v.Dict["__module__"]; ok {
+				return mv
+			}
+			return &object.Str{V: "builtins"}
+		case "__doc__":
+			// CPython: 没有 docstring 的类 __doc__ 为 None
+			if dv, ok := v.Dict["__doc__"]; ok {
+				return dv
+			}
+			return object.None
 		case "__class__":
 			return v.Type()
 		case "__bases__":
@@ -510,6 +659,21 @@ func (ip *Interp) GetItem(o object.Object, idx object.Object) object.Object {
 	if t, ok := o.(*object.TypeObj); ok {
 		return ip.makeGenericAlias(t, idx)
 	}
+	// 用户类：优先 __getitem__；其次 dict 子类（底层 _data + __missing__）
+	if inst, ok := o.(*object.Instance); ok && inst.Class != nil {
+		if m, found := ip.findDunder(inst.Class, "__getitem__"); found {
+			return ip.Call(ip.bindMethod(inst, m), []object.Object{idx}, nil)
+		}
+		if dv, ok2 := inst.Dict["_data"].(*object.Dict); ok2 {
+			if hit, found := dv.Get(idx); found {
+				return hit
+			}
+			if m, found := ip.findDunder(inst.Class, "__missing__"); found {
+				return ip.Call(ip.bindMethod(inst, m), []object.Object{idx}, nil)
+			}
+			ip.KeyErr(idx)
+		}
+	}
 	switch v := o.(type) {
 	case *object.Str:
 		rs := []rune(v.V)
@@ -540,6 +704,52 @@ func (ip *Interp) GetItem(o object.Object, idx object.Object) object.Object {
 			ip.IndexErr("string index out of range")
 		}
 		return &object.Str{V: string(rs[p])}
+	case *object.ByteArray:
+		if sl, ok := idx.(*object.Slice); ok {
+			s, e, st := ip.sliceRange(sl, len(v.V))
+			var out []byte
+			if st > 0 {
+				for i := s; i < e; i += st {
+					out = append(out, v.V[i])
+				}
+			} else if st < 0 {
+				for i := s; i > e; i += st {
+					if i >= 0 && i < len(v.V) {
+						out = append(out, v.V[i])
+					}
+				}
+			}
+			return &object.ByteArray{V: out}
+		}
+		i, ok := object.AsInt(idx)
+		if !ok {
+			ip.TypeError("bytearray indices must be integers")
+		}
+		p, ok := normalizeIndex(i, len(v.V))
+		if !ok {
+			ip.IndexErr("bytearray index out of range")
+		}
+		return &object.Int{V: int64(v.V[p])}
+	case *object.MemoryView:
+		if sl, ok := idx.(*object.Slice); ok {
+			s, e, st := ip.sliceRange(sl, len(v.V))
+			var out []byte
+			if st > 0 {
+				for i := s; i < e; i += st {
+					out = append(out, v.V[i])
+				}
+			}
+			return &object.MemoryView{V: out}
+		}
+		i, ok := object.AsInt(idx)
+		if !ok {
+			ip.TypeError("memoryview indices must be integers")
+		}
+		p, ok := normalizeIndex(i, len(v.V))
+		if !ok {
+			ip.IndexErr("memoryview index out of range")
+		}
+		return &object.Int{V: int64(v.V[p])}
 	case *object.Bytes:
 		if sl, ok := idx.(*object.Slice); ok {
 			s, e, st := ip.sliceRange(sl, len(v.V))
@@ -615,6 +825,7 @@ func (ip *Interp) GetItem(o object.Object, idx object.Object) object.Object {
 		}
 		p, ok := normalizeIndex(i, len(v.Items))
 		if !ok {
+			fmt.Fprintf(os.Stderr, "GETITEM-OOB idx=%d len=%d file=%s\n", i, len(v.Items), ip.MainFile)
 			ip.IndexErr("tuple index out of range")
 		}
 		return v.Items[p]
@@ -675,6 +886,17 @@ func (ip *Interp) GetItem(o object.Object, idx object.Object) object.Object {
 
 // SetItem 下标赋值
 func (ip *Interp) SetItem(o object.Object, idx, val object.Object) {
+	// 用户类：优先 __setitem__；其次 dict 子类（底层 _data）
+	if inst, ok := o.(*object.Instance); ok && inst.Class != nil {
+		if m, found := ip.findDunder(inst.Class, "__setitem__"); found {
+			ip.Call(ip.bindMethod(inst, m), []object.Object{idx, val}, nil)
+			return
+		}
+		if dv, ok2 := inst.Dict["_data"].(*object.Dict); ok2 {
+			dv.Set(idx, val)
+			return
+		}
+	}
 	switch v := o.(type) {
 	case *object.List:
 		if sl, ok := idx.(*object.Slice); ok {
@@ -820,6 +1042,18 @@ func (ip *Interp) Iter(o object.Object) object.Object {
 			items[i] = &object.Int{V: int64(b)}
 		}
 		return &object.Iterator{Items: items}
+	case *object.ByteArray:
+		items := make([]object.Object, len(v.V))
+		for i, b := range v.V {
+			items[i] = &object.Int{V: int64(b)}
+		}
+		return &object.Iterator{Items: items}
+	case *object.MemoryView:
+		items := make([]object.Object, len(v.V))
+		for i, b := range v.V {
+			items[i] = &object.Int{V: int64(b)}
+		}
+		return &object.Iterator{Items: items}
 	case *object.Set:
 		return &object.Iterator{Items: v.Items}
 	case *object.Dict:
@@ -835,6 +1069,18 @@ func (ip *Interp) Iter(o object.Object) object.Object {
 		return v
 	case *object.Generator:
 		return v
+	case *object.TypeObj:
+		// 枚举类：list(Color) 走类上的 __iter__（EnumType.__new__ 装配）
+		if m, ok := ip.findDunder(v, "__iter__"); ok {
+			r := ip.Call(ip.bindMethod(v, m), nil, nil)
+			switch rv := r.(type) {
+			case *object.List:
+				return &object.Iterator{Items: rv.Items}
+			case *object.Tuple:
+				return &object.Iterator{Items: rv.Items}
+			}
+			return r
+		}
 	case *object.Instance:
 		if m, ok := ip.findDunder(v.Class, "__iter__"); ok {
 			r := ip.Call(ip.bindMethod(v, m), nil, nil)
@@ -932,6 +1178,14 @@ func (ip *Interp) ToSlice(o object.Object) []object.Object {
 		return v.Items
 	}
 	it := ip.Iter(o)
+	// 防死循环：Iter 可能返回 List/Tuple（如枚举 __iter__ 直接给列表），
+	// 这类值的 IterNext 每次都会从 Pos=0 重建迭代器 → 必须先摊平再迭代。
+	if lst, ok := it.(*object.List); ok {
+		return lst.Items
+	}
+	if tup, ok := it.(*object.Tuple); ok {
+		return tup.Items
+	}
 	var out []object.Object
 	for {
 		val, ok := ip.IterNext(it)

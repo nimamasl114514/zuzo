@@ -73,7 +73,8 @@ func needsBuiltinParserGuard(src string) bool {
 // 保留原样 = 字符串内容错 —— 这些文件必须回退自带 parser。
 // 正则里常见的 \d \s \w \. 等「未知转义」Python 也原样保留，所以不回退。
 // （2026-10-25 第13轮：原实现「含 \ 就整文件回退」会把几乎所有标准库源码
-//   推进自带 parser，实测 warnings.py 首次搭车就 SyntaxError，故改为精确扫描。）
+//
+//	推进自带 parser，实测 warnings.py 首次搭车就 SyntaxError，故改为精确扫描。）
 func hasUnsupportedEscape(src string) bool {
 	i, n := 0, len(src)
 	for i < n {

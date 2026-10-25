@@ -30,6 +30,19 @@ type structItem struct {
 	size int
 }
 
+// structFmt struct 的格式串可以是 str 也可以是 bytes（CPython 两者都收）
+func structFmt(o object.Object) string {
+	switch v := o.(type) {
+	case *object.Bytes:
+		return string(v.V)
+	case *object.ByteArray:
+		return string(v.V)
+	case *object.Str:
+		return v.V
+	}
+	return o.Str()
+}
+
 func parseStructFmt(f string) (binary.ByteOrder, []structItem, error) {
 	var order binary.ByteOrder = binary.LittleEndian // Python 默认 '=' 本机序
 	i := 0
@@ -52,17 +65,18 @@ func parseStructFmt(f string) (binary.ByteOrder, []structItem, error) {
 			i++
 			continue
 		}
+		// 数字前缀：count 作用于紧随其后的类型码（4s / 4H / 2L）
+		count := 1
 		if c >= '0' && c <= '9' {
-			n := 0
+			count = 0
 			for i < len(f) && f[i] >= '0' && f[i] <= '9' {
-				n = n*10 + int(f[i]-'0')
+				count = count*10 + int(f[i]-'0')
 				i++
 			}
-			if len(items) == 0 {
+			if i >= len(f) {
 				return nil, nil, fmt.Errorf("bad struct format")
 			}
-			items[len(items)-1].size *= n
-			continue
+			c = f[i]
 		}
 		sz := 0
 		switch c {
@@ -85,7 +99,7 @@ func parseStructFmt(f string) (binary.ByteOrder, []structItem, error) {
 		default:
 			return nil, nil, fmt.Errorf("bad char in struct format: %q", string(c))
 		}
-		items = append(items, structItem{code: c, size: sz})
+		items = append(items, structItem{code: c, size: sz * count})
 		i++
 	}
 	return order, items, nil
@@ -249,7 +263,7 @@ func bytesOf(o object.Object) []byte {
 func modStruct(ip *Interp) *object.Module {
 	m := newModule("struct")
 	m.Dict["calcsize"] = bi("calcsize", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-		n, err := structCalcSize(a[0].Str())
+		n, err := structCalcSize(structFmt(a[0]))
 		if err != nil {
 			ip.raise(ip.excType("ValueError"), "%v", err)
 		}
@@ -259,7 +273,7 @@ func modStruct(ip *Interp) *object.Module {
 		if len(a) == 0 {
 			ip.TypeError("pack() requires a format")
 		}
-		out, err := structPack(ip, a[0].Str(), a[1:])
+		out, err := structPack(ip, structFmt(a[0]), a[1:])
 		if err != nil {
 			ip.raise(ip.excType("ValueError"), "%v", err)
 		}
@@ -269,7 +283,7 @@ func modStruct(ip *Interp) *object.Module {
 		if len(a) < 2 {
 			ip.TypeError("unpack() requires (format, buffer)")
 		}
-		vals, err := structUnpack(ip, a[0].Str(), bytesOf(a[1]))
+		vals, err := structUnpack(ip, structFmt(a[0]), bytesOf(a[1]))
 		if err != nil {
 			ip.raise(ip.excType("ValueError"), "%v", err)
 		}
@@ -284,7 +298,56 @@ func modStruct(ip *Interp) *object.Module {
 		}
 		return &object.Tuple{Items: []object.Object{}}, nil
 	})
-	m.Dict["Struct"] = &object.TypeObj{Name: "Struct", Dict: map[string]object.Object{}}
+	structCls := &object.TypeObj{Name: "Struct", Dict: map[string]object.Object{}}
+	structCls.Dict["__init__"] = bi("__init__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) < 2 {
+			ip.TypeError("Struct() requires a format string")
+		}
+		self, ok := a[0].(*object.Instance)
+		if !ok {
+			return object.None, nil
+		}
+		f := structFmt(a[1])
+		self.Dict["format"] = &object.Str{V: f}
+		n, err := structCalcSize(f)
+		if err != nil {
+			ip.ValueError("%v", err)
+		}
+		self.Dict["size"] = &object.Int{V: int64(n)}
+		return object.None, nil
+	})
+	structCls.Dict["pack"] = bi("pack", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) < 2 {
+			ip.TypeError("pack() missing arguments")
+		}
+		self, _ := a[0].(*object.Instance)
+		f := ""
+		if self != nil {
+			f = structFmt(self.Dict["format"])
+		}
+		out, err := structPack(ip, f, a[1:])
+		if err != nil {
+			ip.ValueError("%v", err)
+		}
+		return &object.Bytes{V: out}, nil
+	})
+	structCls.Dict["unpack"] = bi("unpack", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) < 2 {
+			ip.TypeError("unpack() requires data")
+		}
+		self, _ := a[0].(*object.Instance)
+		f := ""
+		if self != nil {
+			f = structFmt(self.Dict["format"])
+		}
+		vals, err := structUnpack(ip, f, bytesOf(a[1]))
+		if err != nil {
+			ip.ValueError("%v", err)
+		}
+		return &object.Tuple{Items: vals}, nil
+	})
+	structCls.Dict["unpack_from"] = structCls.Dict["unpack"]
+	m.Dict["Struct"] = structCls
 	m.Dict["error"] = ip.excType("ValueError")
 	return m
 }
@@ -407,6 +470,7 @@ func (ip *Interp) newCodeObj(f *object.Function) *object.Instance {
 	inst.Dict["co_names"] = &object.Tuple{}
 	return inst
 }
+
 // ==================== Cell 对象（闭包单元，types.CellType 需要） ====================
 
 var cellType = &object.TypeObj{Name: "cell", Dict: map[string]object.Object{}}

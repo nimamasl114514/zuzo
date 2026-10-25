@@ -20,6 +20,7 @@ package runtime
 //   - 不做 aliases / _missing_ / _generate_next_value_ 的完整钩子。
 
 import (
+	"sort"
 	"strings"
 
 	"zuzo/py/object"
@@ -60,6 +61,8 @@ func modEnum(ip *Interp) *object.Module {
 			member.Dict["name"] = &object.Str{V: key}
 			member.Dict["value"] = val
 			member.Dict["__objclass__"] = cls
+			// 原生子类标记：Eq/Cmp/BinOp/int()/格式化 见 native_subclass.go
+			member.Dict["_enum_member_"] = &object.Bool{V: true}
 			cls.Dict[key] = member
 			memberMap.Set(&object.Str{V: key}, member)
 			valueMap.Set(val, member)
@@ -121,6 +124,13 @@ func modEnum(ip *Interp) *object.Module {
 		if !ok {
 			ip.TypeError("EnumMeta.__call__ requires a class")
 		}
+		// type(name, bases, ns) / EnumType(name, bases, ns)：动态建枚举类
+		// （CPython _simple_enum 走的就是 type(cls_name, (etype,), body)）
+		if len(a) >= 4 {
+			if nf, ok := enumMeta.Dict["__new__"]; ok {
+				return ip.Call(nf, a, k), nil
+			}
+		}
 		if len(a) > 1 {
 			if vm, ok := cls.Dict["_value2member_map_"].(*object.Dict); ok {
 				if hit, ok := vm.Get(a[1]); ok {
@@ -151,6 +161,15 @@ func modEnum(ip *Interp) *object.Module {
 	enumType.Dict["__str__"] = bi("__str__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
 		if len(a) > 0 {
 			if inst, ok := a[0].(*object.Instance); ok {
+				// IntEnum / StrEnum：CPython 里 str() 走底层类型（str(HTTPStatus.OK) == "200"）
+				if _, isEnum := inst.Dict["_enum_member_"]; isEnum {
+					if v, has := inst.Dict["value"]; has {
+						switch v.(type) {
+						case *object.Int, *object.Str, *object.Float:
+							return &object.Str{V: v.Str()}, nil
+						}
+					}
+				}
 				if v, ok := inst.Dict["name"]; ok {
 					return &object.Str{V: inst.Class.Name + "." + v.Str()}, nil
 				}
@@ -213,12 +232,97 @@ func modEnum(ip *Interp) *object.Module {
 		return object.None, nil
 	})
 
-	// Flag 组合辅助
+	// _simple_enum(etype=Enum)：CPython 3.12 的「类体直转枚举」装饰器。
+	// http/__init__.py:7 用 @_simple_enum(IntEnum) 定义 HTTPStatus，
+	// 成员值形如 CONTINUE = 100, 'Continue', '...'（元组 = 首元素为值，其余给类体 __new__）。
 	m.Dict["_simple_enum"] = bi("_simple_enum", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-		if len(a) > 0 {
-			return a[0], nil
+		var etype *object.TypeObj = enumType
+		var target *object.TypeObj
+		if v, ok := k["etype"]; ok {
+			if t, ok := v.(*object.TypeObj); ok {
+				etype = t
+			}
 		}
-		return object.None, nil
+		if len(a) > 0 {
+			if t, ok := a[0].(*object.TypeObj); ok {
+				if t.MetaClass == enumMeta {
+					etype = t // _simple_enum(IntEnum) → 作为基类
+				} else {
+					target = t // @_simple_enum 直接作用在类上
+				}
+			}
+		}
+		convert := func(cls *object.TypeObj) object.Object {
+			keys := make([]string, 0, len(cls.Dict))
+			for kk := range cls.Dict {
+				keys = append(keys, kk)
+			}
+			sort.Strings(keys) // Go map 无序，按名排序保证稳定
+			ns := &object.Dict{}
+			for _, kk := range keys {
+				ns.Set(&object.Str{V: kk}, cls.Dict[kk])
+			}
+			var classNew object.Object
+			if v, ok := cls.Dict["__new__"]; ok {
+				classNew = v
+			}
+			if nf, ok := enumMeta.Dict["__new__"]; ok {
+				created := ip.Call(nf, []object.Object{enumMeta, &object.Str{V: cls.Name}, &object.List{Items: []object.Object{etype}}, ns}, nil)
+				newCls, _ := created.(*object.TypeObj)
+				if newCls == nil {
+					return created
+				}
+				// 有类体 __new__ 时：用它重建成员（元组展开 + 自定义属性，如 HTTPStatus.phrase）
+				if classNew != nil {
+					memberMap, _ := newCls.Dict["_member_map_"].(*object.Dict)
+					for _, kk := range keys {
+						if strings.HasPrefix(kk, "_") {
+							continue
+						}
+						vv := cls.Dict[kk]
+						switch vv.(type) {
+						case *object.Function, *object.Builtin, *object.Property, *object.StaticMethod, *object.ClassMethod:
+							continue
+						}
+						args := []object.Object{newCls}
+						if t, ok := vv.(*object.Tuple); ok {
+							args = append(args, t.Items...)
+						} else {
+							args = append(args, vv)
+						}
+						built := ip.Call(classNew, args, nil)
+						inst, ok := built.(*object.Instance)
+						if !ok {
+							continue
+						}
+						if _, has := inst.Dict["value"]; !has && len(args) > 1 {
+							inst.Dict["value"] = args[1]
+						}
+						inst.Dict["name"] = &object.Str{V: kk}
+						inst.Dict["_enum_member_"] = &object.Bool{V: true}
+						inst.Class = newCls
+						newCls.Dict[kk] = inst
+						if memberMap != nil {
+							memberMap.Set(&object.Str{V: kk}, inst)
+						}
+					}
+				}
+				return newCls
+			}
+			return cls
+		}
+		if target != nil {
+			return convert(target), nil
+		}
+		return bi("_simple_enum.decorator", func(da []object.Object, dk map[string]object.Object) (object.Object, error) {
+			if len(da) == 0 {
+				return object.None, nil
+			}
+			if cls, ok := da[0].(*object.TypeObj); ok {
+				return convert(cls), nil
+			}
+			return da[0], nil
+		}), nil
 	})
 	return m
 }

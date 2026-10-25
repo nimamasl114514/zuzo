@@ -125,7 +125,10 @@ func (ip *Interp) evalExpr(e ast.Expr, env *object.Env) object.Object {
 			}
 		}
 		// lambda 体是表达式：包成 return 语句
+		// 体里出现 yield 时（`lambda: (yield)`），lambda 是生成器函数——
+		// _collections_abc.py:88 用 `type((lambda: (yield))())` 取 generator 类型。
 		fn.LambdaBody = n.Body
+		fn.IsGenerator = containsYield([]ast.Stmt{&ast.Return{Value: n.Body}})
 		return fn
 	case *ast.ListComp:
 		return ip.evalListComp(n, env)
@@ -484,6 +487,30 @@ func (ip *Interp) makeClass(node *ast.ClassDef, env *object.Env) *object.TypeObj
 			ip.TypeError("class bases must be types (base #%d is %s: %s)", len(cls.Bases), object.TypeName(bv), bv.Repr())
 		}
 	}
+	// typing.NamedTuple：伪基类，建类时按注解字段装配 namedtuple 协议，然后摘掉这个基类
+	isNamedTuple := false
+	for _, b := range cls.Bases {
+		if b.Dict != nil {
+			if _, ok := b.Dict[namedTupleMarker]; ok {
+				isNamedTuple = true
+			}
+		}
+	}
+	if isNamedTuple {
+		kept := make([]*object.TypeObj, 0, len(cls.Bases))
+		for _, b := range cls.Bases {
+			if b.Dict != nil {
+				if _, ok := b.Dict[namedTupleMarker]; ok {
+					continue
+				}
+			}
+			kept = append(kept, b)
+		}
+		cls.Bases = kept
+		if len(cls.Bases) == 0 {
+			cls.Bases = []*object.TypeObj{object.ObjectType}
+		}
+	}
 	// rawBases = 源码里写的基类（可能为空）；传给 metaclass 的 __prepare__ / __new__
 	// 必须是原样，不能补 object —— CPython 的 enum 就靠 `if not bases` 走默认分支。
 	rawBases := append([]*object.TypeObj{}, cls.Bases...)
@@ -594,6 +621,18 @@ func (ip *Interp) makeClass(node *ast.ClassDef, env *object.Env) *object.TypeObj
 				ip.Call(ip.bindMethod(v, m), []object.Object{cls, &object.Str{V: name}}, nil)
 			})
 		}
+	}
+	// NamedTuple：按类体注解顺序装配字段协议
+	if isNamedTuple {
+		names := append([]string{}, classEnv.ClassAnnotations...)
+		if len(names) == 0 {
+			if ann, ok := cls.Dict["__annotations__"].(*object.Dict); ok {
+				for _, k := range ann.Keys {
+					names = append(names, k.Str())
+				}
+			}
+		}
+		ip.buildNamedTuple(cls, names)
 	}
 	// 类名绑定由调用方完成；装饰器在此应用
 	var result object.Object = cls
@@ -835,6 +874,12 @@ func typeOfAttr(v object.Object) *object.TypeObj {
 func (ip *Interp) asBaseType(v object.Object) (*object.TypeObj, bool) {
 	if t, ok := v.(*object.TypeObj); ok {
 		return t, true
+	}
+	// PEP 560：泛型别名作基类（class Foo(dict[str, int])）取 __origin__
+	if inst, ok := v.(*object.Instance); ok && inst.Class == genericAliasType {
+		if o, ok := inst.Dict["__origin__"].(*object.TypeObj); ok {
+			return o, true
+		}
 	}
 	if b, ok := v.(*object.Builtin); ok {
 		switch b.Name {

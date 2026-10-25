@@ -15,27 +15,27 @@ import (
 
 // Interp Python 解释器实例
 type Interp struct {
-	Globals    *object.Env // 全局作用域
-	Builtins   *object.Env // 内置作用域
-	Modules    map[string]*object.Module
-	SysPath    []string        // sys.path 的镜像（兼容读点）
-	SysPathList *object.List   // sys.path 真身：Python 侧 append/insert 立即生效
-	SysModules  *object.Dict   // sys.modules 视图（与 Modules map 同步）
-	stdlibDir   string         // CPython Lib 目录（标准库纯 py 兜底，永远排最后）
+	Globals     *object.Env // 全局作用域
+	Builtins    *object.Env // 内置作用域
+	Modules     map[string]*object.Module
+	SysPath     []string        // sys.path 的镜像（兼容读点）
+	SysPathList *object.List    // sys.path 真身：Python 侧 append/insert 立即生效
+	SysModules  *object.Dict    // sys.modules 视图（与 Modules map 同步）
+	stdlibDir   string          // CPython Lib 目录（标准库纯 py 兜底，永远排最后）
 	ExitFuncs   []object.Object // atexit 注册的回调（逆序执行）
-	pathMu     sync.Mutex
-	pathProbed bool            // 惰性探测是否已跑过（一次性）
-	Stdout     io.Writer
-	Stderr     io.Writer
-	Cwd        string
-	MainFile   string
-	Depth      int
-	MaxDepth   int
-	Frames     []string
-	genStack   []*genCtx
-	currentEnv *object.Env
-	kwOrder    []string // 最近一次调用的关键字参数顺序
-	ExcTypes   map[string]*object.TypeObj
+	pathMu      sync.Mutex
+	pathProbed  bool // 惰性探测是否已跑过（一次性）
+	Stdout      io.Writer
+	Stderr      io.Writer
+	Cwd         string
+	MainFile    string
+	Depth       int
+	MaxDepth    int
+	Frames      []string
+	genStack    []*genCtx
+	currentEnv  *object.Env
+	kwOrder     []string // 最近一次调用的关键字参数顺序
+	ExcTypes    map[string]*object.TypeObj
 	// numCache 数字字面量解析结果缓存（key = AST 节点指针）。
 	// 循环条件/常量在热路径上每轮都会求值，重复 ParseInt 是主要开销之一；
 	// 用 sync.Map 因为 threading/asyncio 模块会在 goroutine 中并发求值。
@@ -102,7 +102,7 @@ func New() *Interp {
 	ip.Cwd = cwd
 	ip.initSysPath()
 	registerBuiltins(ip)
-	registerBuiltinModules(ip)
+	registerBuiltinModules(ip) // 内部末尾已调 registerStdlibPatch
 	return ip
 }
 
@@ -147,6 +147,7 @@ func (ip *Interp) ValueError(format string, a ...interface{}) {
 
 // NameErr 名字错误
 func (ip *Interp) NameErr(name string) {
+	fmt.Fprintf(os.Stderr, "NAMEERR %s @ %s\n", name, ip.MainFile)
 	ip.raise(ip.excType("NameError"), "name '%s' is not defined", name)
 }
 
@@ -166,6 +167,7 @@ func (ip *Interp) KeyErr(key object.Object) {
 
 // AttrErr 属性错误
 func (ip *Interp) AttrErr(o object.Object, attr string) {
+	fmt.Fprintf(os.Stderr, "ATTRERR %s.%s @ %s\n", object.TypeName(o), attr, ip.MainFile)
 	ip.raise(ip.excType("AttributeError"), "'%s' object has no attribute '%s'", object.TypeName(o), attr)
 }
 

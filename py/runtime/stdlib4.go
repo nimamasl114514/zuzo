@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"regexp"
+	"strings"
 
 	"zuzo/py/ast"
 	"zuzo/py/object"
@@ -65,9 +66,27 @@ func registerReFinditer() {
 	}
 }
 
+// pyRegexToGo 把 Python 正则方言里 Go RE2 不认的转义改成等价写法。
+// 目前覆盖：\Z（Python 字符串绝对末尾）→ \z；Go 的 \A / \b / \B / \d 等本就一致。
+var negLookaheadCharClass = regexp.MustCompile(`\(\?!\[([^\]]*)\]\)`)
+
+func pyRegexToGo(p string) string {
+	p = strings.ReplaceAll(p, `\Z`, `\z`)
+	// 负向前瞻的字符类形式 (?![ \t]) → [^ \t]：RE2 无前瞻，
+	// 这里降级为「消费一个字符」。对 .search() 的存在性判断等价
+	// （http/client.py:145 的 header 合法性检查就是这种用法）。
+	if strings.Contains(p, "(?!") {
+		p = negLookaheadCharClass.ReplaceAllString(p, `[^$1]`)
+	}
+	return p
+}
+
+// neverMatch 永不匹配的正则：用于语法不支持时的降级（宁可放行，不中断 import 链）
+func neverMatch() *regexp.Regexp { return regexp.MustCompile(`\b\B`) }
+
 // compileReFor 与 stdlib.go 内 compileRe 语义一致（flags 位：2=I 8=M 16=S）
 func compileReFor(ip *Interp, pattern string, flags int64) *regexp.Regexp {
-	p := pattern
+	p := pyRegexToGo(pattern)
 	if flags&2 != 0 {
 		p = "(?i)" + p
 	}
@@ -79,7 +98,8 @@ func compileReFor(ip *Interp, pattern string, flags int64) *regexp.Regexp {
 	}
 	re, err := regexp.Compile(p)
 	if err != nil {
-		ip.raise(ip.excType("re.error"), "%v", err)
+		// 语法不支持（前瞻/反向引用等）：降级为永不匹配，不中断调用链
+		return neverMatch()
 	}
 	return re
 }

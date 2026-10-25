@@ -417,6 +417,7 @@ func dirExists(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && st.IsDir()
 }
+
 // addSysPathDirFront 把目录插到 sys.path 最前（主文件目录用）。
 func (ip *Interp) addSysPathDirFront(p string) bool {
 	if ip.SysPathList == nil || p == "" {

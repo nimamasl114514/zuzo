@@ -202,12 +202,67 @@ func modUnderscoreCodecs(ip *Interp) *object.Module {
 		if _, ok := lookupEncoding(name); !ok {
 			ip.raise(ip.excType("LookupError"), "unknown encoding: %s", name)
 		}
+		// CPython 的 CodecInfo 是 4 元组：(encode, decode, streamreader, streamwriter)
+		// urllib3/filepost.py:11 取 [3] 当增量编码器：writer.encode(text) → bytes
+		mkEnc := func() *object.Builtin {
+			return bi("encode", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+				src := ""
+				if len(a) > 0 {
+					src = a[0].Str()
+				}
+				errMode := "strict"
+				if len(a) > 1 && a[1] != object.None {
+					errMode = a[1].Str()
+				}
+				b, err := codecEncode(src, name, errMode)
+				if err != nil {
+					ip.raise(ip.excType("UnicodeEncodeError"), "%v", err)
+				}
+				if len(a) > 1 {
+					return &object.Bytes{V: b}, nil // IncrementalEncoder 语义
+				}
+				return &object.Tuple{Items: []object.Object{&object.Bytes{V: b}, &object.Int{V: int64(len(src))}}}, nil
+			})
+		}
+		mkDec := func() *object.Builtin {
+			return bi("decode", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+				var data []byte
+				if len(a) > 0 {
+					switch v := a[0].(type) {
+					case *object.Bytes:
+						data = v.V
+					case *object.ByteArray:
+						data = v.V
+					case *object.Str:
+						data = []byte(v.V)
+					}
+				}
+				errMode := "strict"
+				if len(a) > 1 && a[1] != object.None {
+					errMode = a[1].Str()
+				}
+				str, err := codecDecode(data, name, errMode)
+				if err != nil {
+					ip.raise(ip.excType("UnicodeDecodeError"), "%v", err)
+				}
+				if len(a) > 1 {
+					return &object.Str{V: str}, nil
+				}
+				return &object.Tuple{Items: []object.Object{&object.Str{V: str}, &object.Int{V: int64(len(data))}}}, nil
+			})
+		}
 		encType := &object.TypeObj{Name: "CodecInfo", Dict: map[string]object.Object{}}
 		rt := &object.Instance{Class: encType, Dict: map[string]object.Object{}}
 		rt.Dict["name"] = &object.Str{V: name}
-		return &object.Tuple{Items: []object.Object{
-			&object.Function{Name: "encode"}, &object.Function{Name: "decode"}, rt,
-		}}, nil
+		incEnc := &object.Instance{Class: &object.TypeObj{Name: "IncrementalEncoder", Dict: map[string]object.Object{}}, Dict: map[string]object.Object{}}
+		incEnc.Dict["encode"] = mkEnc()
+		incEnc.Dict["reset"] = bi("reset", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			return object.None, nil
+		})
+		incDec := &object.Instance{Class: &object.TypeObj{Name: "IncrementalDecoder", Dict: map[string]object.Object{}}, Dict: map[string]object.Object{}}
+		incDec.Dict["decode"] = mkDec()
+		incDec.Dict["reset"] = incEnc.Dict["reset"]
+		return &object.Tuple{Items: []object.Object{mkEnc(), mkDec(), incDec, incEnc}}, nil
 	})
 	return m
 }

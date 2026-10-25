@@ -14,6 +14,15 @@ import (
 
 // Eq Python 相等比较（含 __eq__ 分派）
 func (ip *Interp) Eq(a, b object.Object) bool {
+	// 枚举成员（IntEnum/StrEnum 等）按底层原生值比较，对齐 CPython「IntEnum 是 int 子类」
+	a, b = ip.unwrapNative(a), ip.unwrapNative(b)
+	// NamedTuple 与普通 tuple 互比（sys.version_info == (3, 11, 0, ...)）
+	if t, ok := ip.asTupleLike(a); ok {
+		a = t
+	}
+	if t, ok := ip.asTupleLike(b); ok {
+		b = t
+	}
 	if inst, ok := a.(*object.Instance); ok {
 		if m, ok := ip.findDunder(inst.Class, "__eq__"); ok {
 			r := ip.Call(ip.bindMethod(inst, m), []object.Object{b}, nil)
@@ -68,6 +77,14 @@ func (ip *Interp) IsIdentical(a, b object.Object) bool {
 
 // Cmp 三路比较（走 __eq__ / __lt__ 等魔术方法）
 func (ip *Interp) Cmp(a, b object.Object) (int, bool) {
+	a, b = ip.unwrapNative(a), ip.unwrapNative(b)
+	// NamedTuple 与普通 tuple 互比（sys.version_info >= (3, 9)）
+	if t, ok := ip.asTupleLike(a); ok {
+		a = t
+	}
+	if t, ok := ip.asTupleLike(b); ok {
+		b = t
+	}
 	if inst, ok := a.(*object.Instance); ok {
 		if ip.Eq(a, b) {
 			return 0, true
@@ -186,6 +203,8 @@ var rdunderNames = map[string]string{
 
 // BinOp 二元运算
 func (ip *Interp) BinOp(op string, a, b object.Object) object.Object {
+	// 枚举成员先解包成原生值：Color.RED + 1 → 2（对齐 IntEnum 是 int 子类）
+	a, b = ip.unwrapNative(a), ip.unwrapNative(b)
 	// PEP 604：类型并集 int | str（types.py: UnionType = type(int | str)）
 	if op == "|" {
 		if _, ok := a.(*object.TypeObj); ok {
@@ -854,9 +873,11 @@ func (ip *Interp) formatPercent(format string, arg object.Object) object.Object 
 			break
 		}
 		i++
-		// 跳过映射键
+		// 映射键 %(name)s：记下键名，取值时从映射对象里取
+		keyName := ""
 		if rs[i] == '(' {
 			depth := 1
+			ks := i + 1
 			for i < len(rs) && depth > 0 {
 				i++
 				if i < len(rs) && rs[i] == '(' {
@@ -865,6 +886,9 @@ func (ip *Interp) formatPercent(format string, arg object.Object) object.Object 
 				if i < len(rs) && rs[i] == ')' {
 					depth--
 				}
+			}
+			if i > ks {
+				keyName = string(rs[ks:i])
 			}
 			if i < len(rs) {
 				i++
@@ -888,8 +912,20 @@ func (ip *Interp) formatPercent(format string, arg object.Object) object.Object 
 		if ai >= len(args) {
 			ip.TypeError("not enough arguments for format string")
 		}
-		v := args[ai]
-		ai++
+		var v object.Object
+		if keyName != "" {
+			// 映射格式：所有占位共用同一个映射参数
+			if len(args) == 0 {
+				ip.TypeError("format requires a mapping")
+			}
+			v = ip.GetItem(args[0], &object.Str{V: keyName})
+		} else {
+			if ai >= len(args) {
+				ip.TypeError("not enough arguments for format string")
+			}
+			v = ip.unwrapNative(args[ai])
+			ai++
+		}
 		switch verb {
 		case 's':
 			sb.WriteString(ip.StrOf(v))
@@ -940,6 +976,13 @@ func (ip *Interp) formatPercent(format string, arg object.Object) object.Object 
 
 // FormatValue 按 Python format spec 格式化
 func (ip *Interp) FormatValue(v object.Object, spec string) string {
+	// 枚举成员按底层值格式化（CPython: f"{HTTPStatus.OK}" == "200"）
+	if nv, ok := ip.nativeValue(v); ok {
+		if spec == "" {
+			return ip.StrOf(nv)
+		}
+		v = nv
+	}
 	if spec == "" {
 		return ip.StrOf(v)
 	}

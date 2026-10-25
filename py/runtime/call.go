@@ -78,6 +78,24 @@ func (ip *Interp) Call(fn object.Object, args []object.Object, kwargs map[string
 
 // instantiate 实例化类型
 func (ip *Interp) instantiate(cls *object.TypeObj, args []object.Object, kwargs map[string]object.Object) object.Object {
+	// 原生容器类型：bytearray / memoryview（第14轮）
+	if cls == object.ByteArrayType {
+		return ip.makeByteArray(args)
+	}
+	if cls == object.MemoryViewType {
+		if len(args) == 0 {
+			ip.TypeError("memoryview() missing required argument 'object'")
+		}
+		switch v := args[0].(type) {
+		case *object.Bytes:
+			return &object.MemoryView{V: v.V}
+		case *object.ByteArray:
+			return &object.MemoryView{V: v.V}
+		case *object.MemoryView:
+			return v
+		}
+		ip.TypeError("memoryview: a bytes-like object is required, not '%s'", object.TypeName(args[0]))
+	}
 	if cls.IsExc {
 		exc := object.NewException(cls, args...)
 		// 执行用户自定义 __init__（基类 Exception 没有）
@@ -93,6 +111,10 @@ func (ip *Interp) instantiate(cls *object.TypeObj, args []object.Object, kwargs 
 	}
 	// 用户类
 	inst := &object.Instance{Class: cls, Dict: map[string]object.Object{}}
+	// dict 子类（如 email._encoded_words._QByteMap）：用 _data 承载底层字典
+	if cls.IsSubclass(object.DictType) {
+		inst.Dict["_data"] = &object.Dict{}
+	}
 	if init, ok := cls.Lookup("__init__"); ok {
 		ip.Call(ip.bindMethod(inst, init), args, kwargs)
 	} else if len(args) > 0 || len(kwargs) > 0 {

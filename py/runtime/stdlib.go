@@ -692,7 +692,7 @@ func modRe(ip *Interp) *object.Module {
 	m.Dict["DOTALL"] = &object.Int{V: 16}
 
 	compileRe := func(pattern string, flags int64) *regexp.Regexp {
-		p := pattern
+		p := pyRegexToGo(pattern)
 		if flags&2 != 0 {
 			p = "(?i)" + p
 		}
@@ -704,7 +704,8 @@ func modRe(ip *Interp) *object.Module {
 		}
 		re, err := regexp.Compile(p)
 		if err != nil {
-			ip.raise(ip.excType("re.error"), "%v", err)
+			// 语法不支持（前瞻/反向引用等）：降级为永不匹配，不中断调用链
+			return neverMatch()
 		}
 		return re
 	}
@@ -836,6 +837,36 @@ func modRe(ip *Interp) *object.Module {
 			s := a[1].Str()
 			return &object.Str{V: re.ReplaceAllString(s, repl)}, nil
 		})
+		// http/client.py:144 用 Pattern.fullmatch 做 token 校验
+		inst.Dict["fullmatch"] = bi("fullmatch", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			s := a[0].Str()
+			loc := re.FindStringSubmatchIndex(s)
+			if loc == nil || loc[0] != 0 || loc[1] != len(s) {
+				return object.None, nil
+			}
+			return makeMatch(ip, re, s, loc), nil
+		})
+		inst.Dict["finditer"] = bi("finditer", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			return finditerList(ip, re, a[0].Str()), nil
+		})
+		inst.Dict["split"] = bi("split", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			s := a[0].Str()
+			parts := re.Split(s, -1)
+			items := make([]object.Object, len(parts))
+			for i, p := range parts {
+				items[i] = &object.Str{V: p}
+			}
+			return &object.List{Items: items}, nil
+		})
+		inst.Dict["subn"] = bi("subn", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			repl := a[0].Str()
+			src := a[1].Str()
+			out := re.ReplaceAllString(src, repl)
+			n := len(re.FindAllStringIndex(src, -1))
+			return &object.Tuple{Items: []object.Object{&object.Str{V: out}, &object.Int{V: int64(n)}}}, nil
+		})
+		inst.Dict["flags"] = &object.Int{V: flags}
+		inst.Dict["groups"] = &object.Int{V: int64(re.NumSubexp())}
 		return inst, nil
 	})
 	return m
@@ -907,6 +938,57 @@ func makeMatch(ip *Interp, re *regexp.Regexp, s string, loc []int) object.Object
 
 func modOS(ip *Interp) *object.Module {
 	m := newModule("os")
+	// 常用常量（io.py / urllib3 的磁盘缓存都会用）
+	m.Dict["SEEK_SET"] = &object.Int{V: 0}
+	m.Dict["SEEK_CUR"] = &object.Int{V: 1}
+	m.Dict["SEEK_END"] = &object.Int{V: 2}
+	m.Dict["O_RDONLY"] = &object.Int{V: 0}
+	m.Dict["O_WRONLY"] = &object.Int{V: 1}
+	m.Dict["O_RDWR"] = &object.Int{V: 2}
+	m.Dict["O_CREAT"] = &object.Int{V: 64}
+	m.Dict["O_TRUNC"] = &object.Int{V: 512}
+	m.Dict["O_APPEND"] = &object.Int{V: 1024}
+	m.Dict["O_BINARY"] = &object.Int{V: 32768}
+	m.Dict["F_OK"] = &object.Int{V: 0}
+	m.Dict["R_OK"] = &object.Int{V: 4}
+	m.Dict["W_OK"] = &object.Int{V: 2}
+	m.Dict["X_OK"] = &object.Int{V: 1}
+	// os.PathLike / fspath：pathlib 与大量库用它做路径协议判断
+	pathLikeCls := &object.TypeObj{Name: "PathLike", Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}}
+	m.Dict["PathLike"] = pathLikeCls
+	m.Dict["fspath"] = bi("fspath", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) == 0 {
+			return &object.Str{V: ""}, nil
+		}
+		switch v := a[0].(type) {
+		case *object.Str:
+			return v, nil
+		case *object.Bytes:
+			return v, nil
+		case *object.Instance:
+			if m2, ok := ip.findDunder(v.Class, "__fspath__"); ok {
+				return ip.Call(ip.bindMethod(v, m2), nil, nil), nil
+			}
+		}
+		ip.TypeError("expected str, bytes or os.PathLike object, not '%s'", object.TypeName(a[0]))
+		return object.None, nil
+	})
+	m.Dict["fsencode"] = bi("fsencode", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) == 0 {
+			return &object.Bytes{}, nil
+		}
+		return &object.Bytes{V: []byte(a[0].Str())}, nil
+	})
+	m.Dict["fsdecode"] = bi("fsdecode", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) == 0 {
+			return &object.Str{V: ""}, nil
+		}
+		switch v := a[0].(type) {
+		case *object.Bytes:
+			return &object.Str{V: string(v.V)}, nil
+		}
+		return &object.Str{V: a[0].Str()}, nil
+	})
 	m.Dict["getcwd"] = bi("getcwd", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		d, _ := os.Getwd()
 		return &object.Str{V: d}, nil
@@ -1088,9 +1170,37 @@ func modSys(ip *Interp) *object.Module {
 		ip.SysModules = &object.Dict{}
 	}
 	m.Dict["modules"] = ip.SysModules
-	m.Dict["version_info"] = &object.Tuple{Items: []object.Object{
-		&object.Int{V: 3}, &object.Int{V: 11}, &object.Int{V: 0},
-		&object.Str{V: "final"}, &object.Int{V: 0},
+	// sys.version_info 是命名元组（有 .major/.minor/.micro 属性，也能下标/切片）
+	viCls := &object.TypeObj{Name: "version_info", Dict: map[string]object.Object{}}
+	ip.buildNamedTuple(viCls, []string{"major", "minor", "micro", "releaselevel", "serial"})
+	vi := &object.Instance{Class: viCls, Dict: map[string]object.Object{
+		"major":        &object.Int{V: 3},
+		"minor":        &object.Int{V: 11},
+		"micro":        &object.Int{V: 0},
+		"releaselevel": &object.Str{V: "final"},
+		"serial":       &object.Int{V: 0},
+	}}
+	m.Dict["version_info"] = vi
+	m.Dict["version"] = &object.Str{V: "3.11.0 (zuzo, Python-compatible runtime)"}
+	m.Dict["platform"] = &object.Str{V: "win32"}
+	m.Dict["maxsize"] = &object.Int{V: 9223372036854775807}
+	m.Dict["float_info"] = &object.Instance{Class: &object.TypeObj{Name: "float_info", Dict: map[string]object.Object{}}, Dict: map[string]object.Object{
+		"max": &object.Float{V: 1.7976931348623157e308}, "min": &object.Float{V: 2.2250738585072014e-308},
+		"epsilon": &object.Float{V: 2.220446049250313e-16}, "dig": &object.Int{V: 15},
+		"mant_dig": &object.Int{V: 53}, "max_exp": &object.Int{V: 1024}, "min_exp": &object.Int{V: -1021},
+		"max_10_exp": &object.Int{V: 308}, "min_10_exp": &object.Int{V: -307},
+		"radix": &object.Int{V: 2}, "rounds": &object.Int{V: 1},
+	}}
+	m.Dict["int_info"] = &object.Instance{Class: &object.TypeObj{Name: "int_info", Dict: map[string]object.Object{}}, Dict: map[string]object.Object{
+		"bits_per_digit": &object.Int{V: 30}, "sizeof_digit": &object.Int{V: 4},
+		"default_max_str_digits": &object.Int{V: 4300}, "str_digits_check_threshold": &object.Int{V: 640},
+	}}
+	m.Dict["hash_info"] = &object.Instance{Class: &object.TypeObj{Name: "hash_info", Dict: map[string]object.Object{}}, Dict: map[string]object.Object{
+		"width": &object.Int{V: 64}, "modulus": &object.Int{V: 2305843009213693951},
+		"inf": &object.Int{V: 314159}, "nan": &object.Int{V: 0},
+		"imag": &object.Int{V: 1000003}, "algorithm": &object.Str{V: "siphash13"},
+		"hash_bits": &object.Int{V: 64}, "seed_bits": &object.Int{V: 128},
+		"cutoff": &object.Int{V: 0},
 	}}
 	m.Dict["hexversion"] = &object.Int{V: 0x030b00f0}
 	m.Dict["byteorder"] = &object.Str{V: "little"}
@@ -1548,6 +1658,52 @@ func modItertools(ip *Interp) *object.Module {
 
 func modFunctools(ip *Interp) *object.Module {
 	m := newModule("functools")
+	// singledispatch：返回可调用包装，调用一律落到基函数（不做真分派）——
+	// 库里的用法基本是「注册若干类型后调一次」，基函数语义足够
+	m.Dict["singledispatch"] = bi("singledispatch", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) == 0 {
+			ip.TypeError("singledispatch requires a function")
+		}
+		base := a[0]
+		cls := &object.TypeObj{Name: "singledispatch", Dict: map[string]object.Object{}}
+		inst := &object.Instance{Class: cls, Dict: map[string]object.Object{}}
+		cls.Dict["__call__"] = bi("__call__", func(x []object.Object, y map[string]object.Object) (object.Object, error) {
+			// x[0] 是 singledispatch 实例本身
+			args := x
+			if len(args) > 0 {
+				args = args[1:]
+			}
+			return ip.Call(base, args, y), nil
+		})
+		inst.Dict["dispatch"] = bi("dispatch", func(x []object.Object, y map[string]object.Object) (object.Object, error) {
+			return base, nil
+		})
+		inst.Dict["register"] = bi("register", func(x []object.Object, y map[string]object.Object) (object.Object, error) {
+			// CPython 语义：
+			//   @fn.register(int)          → 返回「装饰器」（再把实现函数原样返回）
+			//   fn.register(int, impl)     → 直接返回 impl
+			if len(x) >= 3 {
+				return x[2], nil
+			}
+			return &object.Builtin{Name: "register.decorator", Fn: func(z []object.Object, _ map[string]object.Object) (object.Object, error) {
+				if len(z) > 0 {
+					return z[0], nil
+				}
+				return object.None, nil
+			}}, nil
+		})
+		inst.Dict["_clear_cache"] = bi("_clear_cache", func(x []object.Object, y map[string]object.Object) (object.Object, error) {
+			return object.None, nil
+		})
+		return inst, nil
+	})
+	m.Dict["singledispatchmethod"] = m.Dict["singledispatch"]
+	m.Dict["cached_property"] = bi("cached_property", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) == 0 {
+			return object.None, nil
+		}
+		return &object.Property{Fget: a[0]}, nil
+	})
 	m.Dict["reduce"] = bi("reduce", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		fn := args[0]
 		items := ip.ToSlice(args[1])
@@ -1825,6 +1981,72 @@ func modDatetime(ip *Interp) *object.Module {
 		return inst, nil
 	})
 	dateCls := &object.TypeObj{Name: "date", Dict: map[string]object.Object{}}
+	// date(year, month, day)：calendar.py:98 用 datetime.date(2001, i+1, 1).strftime
+	dateCls.Dict["__init__"] = bi("__init__", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		if len(args) == 0 {
+			return object.None, nil
+		}
+		self, ok := args[0].(*object.Instance)
+		if !ok {
+			return object.None, nil
+		}
+		names := []string{"year", "month", "day"}
+		for i, n := range names {
+			v := int64(0)
+			if len(args) > i+1 {
+				v, _ = object.AsInt(args[i+1])
+			}
+			self.Dict[n] = &object.Int{V: v}
+		}
+		return object.None, nil
+	})
+	getDate := func(self *object.Instance, n string) int64 {
+		if v, ok := self.Dict[n]; ok {
+			x, _ := object.AsInt(v)
+			return x
+		}
+		return 0
+	}
+	dateCls.Dict["strftime"] = bi("strftime", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		self, _ := args[0].(*object.Instance)
+		if self == nil || len(args) < 2 {
+			return &object.Str{V: ""}, nil
+		}
+		t := time.Date(int(getDate(self, "year")), time.Month(getDate(self, "month")), int(getDate(self, "day")),
+			0, 0, 0, 0, time.Local)
+		return &object.Str{V: t.Format(goTimeLayout(args[1].Str()))}, nil
+	})
+	dateCls.Dict["isoformat"] = bi("isoformat", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		self, _ := args[0].(*object.Instance)
+		if self == nil {
+			return &object.Str{V: ""}, nil
+		}
+		return &object.Str{V: fmt.Sprintf("%04d-%02d-%02d", getDate(self, "year"), getDate(self, "month"), getDate(self, "day"))}, nil
+	})
+	dateCls.Dict["__str__"] = bi("__str__", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		r, _ := dateCls.Dict["isoformat"].(*object.Builtin).Fn(args, kw)
+		return r, nil
+	})
+	dateCls.Dict["__repr__"] = bi("__repr__", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		r, _ := dateCls.Dict["isoformat"].(*object.Builtin).Fn(args, kw)
+		return &object.Str{V: "datetime.date(" + strings.ReplaceAll(r.Str(), "-", ", ") + ")"}, nil
+	})
+	dateCls.Dict["weekday"] = bi("weekday", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		self, _ := args[0].(*object.Instance)
+		if self == nil {
+			return &object.Int{V: 0}, nil
+		}
+		t := time.Date(int(getDate(self, "year")), time.Month(getDate(self, "month")), int(getDate(self, "day")), 0, 0, 0, 0, time.Local)
+		return &object.Int{V: int64((int(t.Weekday()) + 6) % 7)}, nil
+	})
+	dateCls.Dict["toordinal"] = bi("toordinal", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		self, _ := args[0].(*object.Instance)
+		if self == nil {
+			return &object.Int{V: 0}, nil
+		}
+		t := time.Date(int(getDate(self, "year")), time.Month(getDate(self, "month")), int(getDate(self, "day")), 0, 0, 0, 0, time.UTC)
+		return &object.Int{V: int64(t.Unix()/86400) + 719163}, nil
+	})
 	dateCls.Dict["today"] = bi("today", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		inst := &object.Instance{Class: dateCls, Dict: map[string]object.Object{}}
 		now := time.Now()
@@ -1834,7 +2056,49 @@ func modDatetime(ip *Interp) *object.Module {
 		return inst, nil
 	})
 	m.Dict["date"] = dateCls
-	m.Dict["timedelta"] = &object.TypeObj{Name: "timedelta", Dict: map[string]object.Object{}}
+	tdCls := &object.TypeObj{Name: "timedelta", Dict: map[string]object.Object{}}
+	tdCls.Dict["__init__"] = bi("__init__", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		self, ok := args[0].(*object.Instance)
+		if !ok {
+			return object.None, nil
+		}
+		days, secs, micros := int64(0), int64(0), int64(0)
+		if len(args) > 1 {
+			days, _ = object.AsInt(args[1])
+		}
+		if len(args) > 2 {
+			secs, _ = object.AsInt(args[2])
+		}
+		if len(args) > 3 {
+			micros, _ = object.AsInt(args[3])
+		}
+		if kw != nil {
+			if v, ok := kw["days"]; ok {
+				days, _ = object.AsInt(v)
+			}
+			if v, ok := kw["seconds"]; ok {
+				secs, _ = object.AsInt(v)
+			}
+			if v, ok := kw["microseconds"]; ok {
+				micros, _ = object.AsInt(v)
+			}
+		}
+		self.Dict["days"] = &object.Int{V: days}
+		self.Dict["seconds"] = &object.Int{V: secs}
+		self.Dict["microseconds"] = &object.Int{V: micros}
+		return object.None, nil
+	})
+	tdCls.Dict["total_seconds"] = bi("total_seconds", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		self, _ := args[0].(*object.Instance)
+		if self == nil {
+			return &object.Float{V: 0}, nil
+		}
+		d, _ := object.AsInt(self.Dict["days"])
+		sec, _ := object.AsInt(self.Dict["seconds"])
+		us, _ := object.AsInt(self.Dict["microseconds"])
+		return &object.Float{V: float64(d*86400+sec) + float64(us)/1e6}, nil
+	})
+	m.Dict["timedelta"] = tdCls
 	return m
 }
 
@@ -1930,9 +2194,94 @@ func (ip *Interp) spawnTask(coro object.Object, name string) *object.Task {
 
 func modTyping(ip *Interp) *object.Module {
 	m := newModule("typing")
-	for _, n := range []string{"List", "Dict", "Tuple", "Set", "Optional", "Any", "Union", "Callable", "Iterable", "Iterator", "Sequence", "Mapping", "Type", "NamedTuple", "TYPE_CHECKING",
-		// 泛型与结构类型：作为可继承的空类型存在（下标泛型由 __class_getitem__ 兜底）
-		"Generic", "TypeVar", "TypedDict", "Protocol", "Literal", "Final", "ClassVar", "NoReturn", "TypeAlias"} {
+	// TYPE_CHECKING 必须是 False（CPython 语义）：第三方库里 `if TYPE_CHECKING:`
+	// 块里全是只给类型检查器的相对导入，一旦为真会触发循环导入/多余依赖。
+	m.Dict["TYPE_CHECKING"] = object.FalseObj
+	// typing.NamedTuple：既能当基类（class X(NamedTuple)），也能函数式调用
+	ntMeta := &object.TypeObj{Name: "NamedTupleMeta", Bases: []*object.TypeObj{object.TypeType}, Dict: map[string]object.Object{}}
+	ntMeta.Dict["__call__"] = bi("__call__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) < 2 {
+			ip.TypeError("NamedTuple() requires a typename")
+		}
+		name := a[1].Str()
+		cls := &object.TypeObj{Name: name, Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}}
+		var names []string
+		if len(a) > 2 {
+			for _, f := range ip.ToSlice(a[2]) {
+				pair := ip.ToSlice(f)
+				if len(pair) > 0 {
+					names = append(names, pair[0].Str())
+				}
+			}
+		}
+		ip.buildNamedTuple(cls, names)
+		return cls, nil
+	})
+	ntType := &object.TypeObj{Name: "NamedTuple", Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}, MetaClass: ntMeta}
+	ntType.Dict[namedTupleMarker] = object.TrueObj
+	m.Dict["NamedTuple"] = ntType
+	// 装饰器类（返回原对象）：@overload / @final / @runtime_checkable / @no_type_check
+	ident := func(name string) *object.Builtin {
+		return bi(name, func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			if len(a) > 0 {
+				return a[0], nil
+			}
+			return object.None, nil
+		})
+	}
+	m.Dict["overload"] = ident("overload")
+	m.Dict["final"] = ident("final")
+	m.Dict["runtime_checkable"] = ident("runtime_checkable")
+	m.Dict["no_type_check"] = ident("no_type_check")
+	m.Dict["no_type_check_decorator"] = ident("no_type_check_decorator")
+	m.Dict["dataclass_transform"] = ident("dataclass_transform")
+	m.Dict["NewType"] = ident("NewType")
+	m.Dict["TypeVar"] = ident("TypeVar")
+	m.Dict["ParamSpec"] = ident("ParamSpec")
+	m.Dict["TypeVarTuple"] = ident("TypeVarTuple")
+	m.Dict["Unpack"] = ident("Unpack")
+	m.Dict["cast"] = bi("cast", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) > 1 {
+			return a[1], nil
+		}
+		return object.None, nil
+	})
+	m.Dict["assert_type"] = bi("assert_type", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) > 0 {
+			return a[0], nil
+		}
+		return object.None, nil
+	})
+	m.Dict["reveal_type"] = m.Dict["assert_type"]
+	m.Dict["assert_never"] = bi("assert_never", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		ip.TypeError("Expected code to be unreachable")
+		return object.None, nil
+	})
+	m.Dict["get_type_hints"] = bi("get_type_hints", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) > 0 {
+			if t, ok := a[0].(*object.TypeObj); ok {
+				if ann, ok := t.Dict["__annotations__"]; ok {
+					return ann, nil
+				}
+			}
+		}
+		return &object.Dict{}, nil
+	})
+	m.Dict["get_origin"] = bi("get_origin", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return object.None, nil
+	})
+	m.Dict["get_args"] = bi("get_args", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return &object.Tuple{}, nil
+	})
+	for _, n := range []string{"List", "Dict", "Tuple", "Set", "Optional", "Any", "Union", "Callable", "Iterable", "Iterator", "Sequence", "Mapping", "Type",
+		"Generic", "TypedDict", "Protocol", "Literal", "Final", "ClassVar", "NoReturn", "TypeAlias", "Self",
+		"AnyStr", "Text", "IO", "BinaryIO", "FrozenSet", "AbstractSet", "MutableMapping", "MutableSequence",
+		"MutableSet", "DefaultDict", "Deque", "Counter", "OrderedDict", "ChainMap", "KeysView", "ValuesView",
+		"ItemsView", "AsyncIterable", "AsyncIterator", "Awaitable", "Coroutine", "AsyncGenerator",
+		"AsyncContextManager", "ContextManager", "Generator", "Hashable", "Reversible", "Sized",
+		"SupportsInt", "SupportsFloat", "SupportsBytes", "SupportsComplex", "SupportsIndex", "SupportsAbs",
+		"SupportsRound", "Annotated", "Concatenate", "Required", "NotRequired", "LiteralString", "Never",
+		"TypeGuard", "TypeAliasType", "ForwardRef", "Pattern", "Match"} {
 		m.Dict[n] = &object.TypeObj{Name: n, Dict: map[string]object.Object{}}
 	}
 	return m

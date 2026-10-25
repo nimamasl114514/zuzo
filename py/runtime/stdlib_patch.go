@@ -29,78 +29,8 @@ func registerStdlibPatch(ip *Interp) {
 			m.Dict[k] = &object.Int{V: v}
 		}
 	})
-	patchBuiltinModule("urllib.parse", func(ip *Interp, m *object.Module) {
-		m.Dict["urlsplit"] = bi("urlsplit", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-			if len(a) == 0 {
-				ip.TypeError("urlsplit() requires a string")
-			}
-			return ip.urlSplitResult(a[0].Str(), false), nil
-		})
-		m.Dict["urlparse"] = bi("urlparse", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-			if len(a) == 0 {
-				ip.TypeError("urlparse() requires a string")
-			}
-			return ip.urlSplitResult(a[0].Str(), true), nil
-		})
-		m.Dict["urlunsplit"] = bi("urlunsplit", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-			parts := ip.ToSlice(a[0])
-			get := func(i int) string {
-				if i < len(parts) {
-					return parts[i].Str()
-				}
-				return ""
-			}
-			return &object.Str{V: joinURL(get(0), get(1), get(2), get(3), get(4))}, nil
-		})
-		m.Dict["urljoin"] = bi("urljoin", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-			base, ref := a[0].Str(), a[1].Str()
-			bu, err := url.Parse(base)
-			if err != nil {
-				return &object.Str{V: ref}, nil
-			}
-			ru, err := url.Parse(ref)
-			if err != nil {
-				return &object.Str{V: ref}, nil
-			}
-			return &object.Str{V: bu.ResolveReference(ru).String()}, nil
-		})
-		m.Dict["parse_qs"] = bi("parse_qs", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-			qs := a[0].Str()
-			keepBlank := false
-			if len(a) > 1 {
-				keepBlank = object.Truthy(a[1])
-			}
-			out := &object.Dict{}
-			for _, kv := range parseQuery(qs) {
-				if kv[1] == "" && !keepBlank {
-					continue
-				}
-				key := &object.Str{V: kv[0]}
-				val := &object.Str{V: kv[1]}
-				if prev, ok := out.Get(key); ok {
-					if lst, ok := prev.(*object.List); ok {
-						lst.Items = append(lst.Items, val)
-						continue
-					}
-				}
-				out.Set(key, &object.List{Items: []object.Object{val}})
-			}
-			return out, nil
-		})
-		m.Dict["parse_qsl"] = bi("parse_qsl", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-			var items []object.Object
-			for _, kv := range parseQuery(a[0].Str()) {
-				items = append(items, &object.Tuple{Items: []object.Object{
-					&object.Str{V: kv[0]}, &object.Str{V: kv[1]},
-				}})
-			}
-			return &object.List{Items: items}, nil
-		})
-		m.Dict["unquote_plus"] = bi("unquote_plus", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-			s := strings.ReplaceAll(a[0].Str(), "+", " ")
-			return &object.Str{V: unquoteStr(s)}, nil
-		})
-	})
+	patchBuiltinModule("urllib.parse", addUrllibParseExtras)
+
 	patchBuiltinModule("_codecs", func(ip *Interp, m *object.Module) {
 		m.Dict["lookup_error"] = ip.excType("LookupError")
 		// codecs.register(search_function)：CPython 的 encodings 包会注册大量搜索函数，
@@ -304,4 +234,77 @@ func unquoteStr(s string) string {
 		sb.WriteByte(s[i])
 	}
 	return sb.String()
+}
+
+func addUrllibParseExtras(ip *Interp, m *object.Module) {
+	m.Dict["urlsplit"] = bi("urlsplit", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) == 0 {
+			ip.TypeError("urlsplit() requires a string")
+		}
+		return ip.urlSplitResult(a[0].Str(), false), nil
+	})
+	m.Dict["urlparse"] = bi("urlparse", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) == 0 {
+			ip.TypeError("urlparse() requires a string")
+		}
+		return ip.urlSplitResult(a[0].Str(), true), nil
+	})
+	m.Dict["urlunsplit"] = bi("urlunsplit", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		parts := ip.ToSlice(a[0])
+		get := func(i int) string {
+			if i < len(parts) {
+				return parts[i].Str()
+			}
+			return ""
+		}
+		return &object.Str{V: joinURL(get(0), get(1), get(2), get(3), get(4))}, nil
+	})
+	m.Dict["urljoin"] = bi("urljoin", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		base, ref := a[0].Str(), a[1].Str()
+		bu, err := url.Parse(base)
+		if err != nil {
+			return &object.Str{V: ref}, nil
+		}
+		ru, err := url.Parse(ref)
+		if err != nil {
+			return &object.Str{V: ref}, nil
+		}
+		return &object.Str{V: bu.ResolveReference(ru).String()}, nil
+	})
+	m.Dict["parse_qs"] = bi("parse_qs", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		qs := a[0].Str()
+		keepBlank := false
+		if len(a) > 1 {
+			keepBlank = object.Truthy(a[1])
+		}
+		out := &object.Dict{}
+		for _, kv := range parseQuery(qs) {
+			if kv[1] == "" && !keepBlank {
+				continue
+			}
+			key := &object.Str{V: kv[0]}
+			val := &object.Str{V: kv[1]}
+			if prev, ok := out.Get(key); ok {
+				if lst, ok := prev.(*object.List); ok {
+					lst.Items = append(lst.Items, val)
+					continue
+				}
+			}
+			out.Set(key, &object.List{Items: []object.Object{val}})
+		}
+		return out, nil
+	})
+	m.Dict["parse_qsl"] = bi("parse_qsl", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		var items []object.Object
+		for _, kv := range parseQuery(a[0].Str()) {
+			items = append(items, &object.Tuple{Items: []object.Object{
+				&object.Str{V: kv[0]}, &object.Str{V: kv[1]},
+			}})
+		}
+		return &object.List{Items: items}, nil
+	})
+	m.Dict["unquote_plus"] = bi("unquote_plus", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		s := strings.ReplaceAll(a[0].Str(), "+", " ")
+		return &object.Str{V: unquoteStr(s)}, nil
+	})
 }

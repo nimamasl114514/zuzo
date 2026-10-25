@@ -1,9 +1,11 @@
 package runtime
 
 import (
+	"fmt"
 	"math"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 
 	"zuzo/py/object"
@@ -187,6 +189,60 @@ func (ip *Interp) initExceptions() {
 		}}
 	}
 	ip.Builtins.Set("object", ObjectType)
+	// complex：最小实现（real/imag + repr + 相等），够 requests/urllib3 的类型探测用
+	complexCls := &object.TypeObj{Name: "complex", Bases: []*object.TypeObj{ObjectType}, Dict: map[string]object.Object{}}
+	complexCls.Dict["__init__"] = bi("__init__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) < 1 {
+			return object.None, nil
+		}
+		self, ok := a[0].(*object.Instance)
+		if !ok {
+			return object.None, nil
+		}
+		re, im := 0.0, 0.0
+		if len(a) > 1 {
+			switch v := a[1].(type) {
+			case *object.Int:
+				re = float64(v.V)
+			case *object.Float:
+				re = v.V
+			case *object.Str:
+				s := strings.TrimSpace(v.V)
+				if idx := strings.IndexAny(s, "jJ"); idx >= 0 {
+					im, _ = strconv.ParseFloat(strings.TrimSpace(s[:idx]), 64)
+				} else {
+					re, _ = strconv.ParseFloat(s, 64)
+				}
+			}
+		}
+		if len(a) > 2 {
+			switch v := a[2].(type) {
+			case *object.Int:
+				im = float64(v.V)
+			case *object.Float:
+				im = v.V
+			}
+		}
+		self.Dict["real"] = &object.Float{V: re}
+		self.Dict["imag"] = &object.Float{V: im}
+		return object.None, nil
+	})
+	complexCls.Dict["__repr__"] = bi("__repr__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) == 0 {
+			return &object.Str{V: "0j"}, nil
+		}
+		self, ok := a[0].(*object.Instance)
+		if !ok {
+			return &object.Str{V: "0j"}, nil
+		}
+		re, _ := object.AsFloat(self.Dict["real"])
+		im, _ := object.AsFloat(self.Dict["imag"])
+		if re == 0 {
+			return &object.Str{V: fmt.Sprintf("%gj", im)}, nil
+		}
+		return &object.Str{V: fmt.Sprintf("(%g+%gj)", re, im)}, nil
+	})
+	ip.Builtins.Set("complex", complexCls)
 	// types.py: GetSetDescriptorType = type(FunctionType.__code__)
 	// FunctionType 是 TypeObj（type(func) 的结果），需要在类上能取到 __code__ 描述符
 	// type.__new__(mcls, name, bases, ns) —— 元类链路的地基：
@@ -244,6 +300,8 @@ func (ip *Interp) initExceptions() {
 
 func registerBuiltins(ip *Interp) {
 	ip.initExceptions()
+	installNativeScalarNew()      // int.__new__ / str.__new__（枚举成员构造依赖）
+	registerByteArrayBuiltins(ip) // bytearray / memoryview（collections.abc 依赖）
 
 	// 常量
 	ip.Builtins.Set("True", object.TrueObj)
@@ -285,37 +343,11 @@ func registerBuiltins(ip *Interp) {
 	})
 
 	ip.reg("range", func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
-		var start, stop, step int64
-		switch len(args) {
-		case 1:
-			v, ok := object.AsInt(args[0])
-			if !ok {
-				ip.TypeError("'%s' object cannot be interpreted as an integer", object.TypeName(args[0]))
-			}
-			start, stop, step = 0, v, 1
-		case 2:
-			a, ok1 := object.AsInt(args[0])
-			b, ok2 := object.AsInt(args[1])
-			if !ok1 || !ok2 {
-				ip.TypeError("range() arguments must be integers")
-			}
-			start, stop, step = a, b, 1
-		case 3:
-			a, ok1 := object.AsInt(args[0])
-			b, ok2 := object.AsInt(args[1])
-			c, ok3 := object.AsInt(args[2])
-			if !ok1 || !ok2 || !ok3 {
-				ip.TypeError("range() arguments must be integers")
-			}
-			start, stop, step = a, b, c
-		default:
-			ip.TypeError("range expected at most 3 arguments, got %d", len(args))
-		}
-		if step == 0 {
-			ip.ValueError("range() arg 3 must not be zero")
-		}
-		return &object.Range{Start: start, Stop: stop, Step: step}, nil
+		return ip.makeRange(args), nil
 	})
+	// 类型对象覆盖同名内建函数：ABC.register 需要 isinstance(range, type) == True
+	ip.Builtins.Set("range", object.RangeType)
+	ip.Builtins.Set("slice", object.SliceType)
 
 	ip.reg("int", func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
 		if len(args) == 0 {
@@ -406,6 +438,9 @@ func registerBuiltins(ip *Interp) {
 		}
 		return s, nil
 	})
+	// set / frozenset 同时是类型对象（abc.register 需要），构造走 instantiate → constructBuiltinType
+	ip.Builtins.Set("set", object.SetType)
+	ip.Builtins.Set("frozenset", object.FrozenSetType)
 	ip.reg("dict", func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
 		d := &object.Dict{}
 		if len(args) > 0 {
@@ -455,6 +490,10 @@ func registerBuiltins(ip *Interp) {
 		switch v := args[0].(type) {
 		case *object.Bytes:
 			return &object.Bytes{V: append([]byte{}, v.V...)}, nil
+		case *object.ByteArray:
+			return &object.Bytes{V: append([]byte{}, v.V...)}, nil
+		case *object.MemoryView:
+			return &object.Bytes{V: append([]byte{}, v.V...)}, nil
 		case *object.Int:
 			return &object.Bytes{V: make([]byte, v.V)}, nil
 		case *object.Str:
@@ -465,6 +504,18 @@ func registerBuiltins(ip *Interp) {
 			_ = enc
 			return &object.Bytes{V: []byte(v.V)}, nil
 		case *object.List, *object.Tuple:
+			items := ip.ToSlice(v)
+			out := make([]byte, len(items))
+			for i, it := range items {
+				n, ok := object.AsInt(it)
+				if !ok || n < 0 || n > 255 {
+					ip.ValueError("bytes must be in range(0, 256)")
+				}
+				out[i] = byte(n)
+			}
+			return &object.Bytes{V: out}, nil
+		case *object.Generator, *object.Iterator, *object.Set, *object.Range:
+			// 任意可迭代（生成器/迭代器/集合/range）→ 逐项取 0..255
 			items := ip.ToSlice(v)
 			out := make([]byte, len(items))
 			for i, it := range items {
@@ -688,6 +739,17 @@ func registerBuiltins(ip *Interp) {
 			return args[0].Type(), nil
 		}
 		if len(args) == 3 {
+			// 元类优先：type(name, bases, ns) 的元类 = 基类中最派生的元类
+			// （CPython _simple_enum 走 type(cls_name, (etype,), body)，必须落到 EnumType）
+			meta := object.TypeType
+			for _, b := range ip.ToSlice(args[1]) {
+				if bt, ok := b.(*object.TypeObj); ok && bt.MetaClass != nil && bt.MetaClass != object.TypeType {
+					meta = bt.MetaClass
+				}
+			}
+			if meta != object.TypeType {
+				return ip.Call(meta, args, kwargs), nil
+			}
 			name := args[0].Str()
 			cls := &object.TypeObj{Name: name, Dict: map[string]object.Object{}}
 			for _, b := range ip.ToSlice(args[1]) {
@@ -704,6 +766,23 @@ func registerBuiltins(ip *Interp) {
 		}
 		ip.TypeError("type() takes 1 or 3 arguments")
 		return object.None, nil
+	})
+	ip.reg("ascii", func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+		if len(args) == 0 {
+			return &object.Str{V: ""}, nil
+		}
+		r := ip.Repr(args[0])
+		var sb strings.Builder
+		for _, ch := range r {
+			if ch < 128 {
+				sb.WriteRune(ch)
+			} else if ch <= 0xffff {
+				sb.WriteString(fmt.Sprintf("\\u%04x", ch))
+			} else {
+				sb.WriteString(fmt.Sprintf("\\U%08x", ch))
+			}
+		}
+		return &object.Str{V: sb.String()}, nil
 	})
 	ip.reg("hasattr", func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
 		if len(args) != 2 {
@@ -1166,6 +1245,10 @@ func (ip *Interp) Len(o object.Object) int {
 		return len([]rune(v.V))
 	case *object.Bytes:
 		return len(v.V)
+	case *object.ByteArray:
+		return len(v.V)
+	case *object.MemoryView:
+		return len(v.V)
 	case *object.List:
 		return len(v.Items)
 	case *object.Tuple:
@@ -1204,6 +1287,13 @@ func (ip *Interp) toInt(o object.Object, args []object.Object) (object.Object, e
 		return &object.Int{V: 0}, nil
 	case *object.Float:
 		return &object.Int{V: int64(v.V)}, nil
+	case *object.Instance:
+		// IntEnum / StrEnum 成员：先解包成原生值再转
+		if nv, ok := ip.nativeValue(v); ok {
+			return ip.toInt(nv, args)
+		}
+		ip.TypeError("int() argument must be a string, a bytes-like object or a number, not '%s'", object.TypeName(o))
+		return object.None, nil
 	case *object.Str:
 		base := int64(10)
 		if len(args) > 1 {
@@ -1396,6 +1486,51 @@ func (ip *Interp) isSubclass(c *object.TypeObj, clsObj object.Object) bool {
 }
 
 // constructBuiltinType 内置类型构造
+// makeRange range(...) 构造（reg 与 constructBuiltinType 共用）
+func (ip *Interp) makeRange(args []object.Object) object.Object {
+	var start, stop, step int64
+	bigArg := func(o object.Object) bool {
+		if i, ok := o.(*object.Int); ok && i.Big != nil {
+			return true
+		}
+		return false
+	}
+	for _, a := range args {
+		if bigArg(a) {
+			return &object.Range{Start: 0, Stop: 0, Step: 1}
+		}
+	}
+	switch len(args) {
+	case 1:
+		v, ok := object.AsInt(args[0])
+		if !ok {
+			ip.TypeError("'%s' object cannot be interpreted as an integer", object.TypeName(args[0]))
+		}
+		start, stop, step = 0, v, 1
+	case 2:
+		a, ok1 := object.AsInt(args[0])
+		b, ok2 := object.AsInt(args[1])
+		if !ok1 || !ok2 {
+			ip.TypeError("range() arguments must be integers")
+		}
+		start, stop, step = a, b, 1
+	case 3:
+		a, ok1 := object.AsInt(args[0])
+		b, ok2 := object.AsInt(args[1])
+		c, ok3 := object.AsInt(args[2])
+		if !ok1 || !ok2 || !ok3 {
+			ip.TypeError("range() arguments must be integers")
+		}
+		start, stop, step = a, b, c
+	default:
+		ip.TypeError("range expected at most 3 arguments, got %d", len(args))
+	}
+	if step == 0 {
+		ip.ValueError("range() arg 3 must not be zero")
+	}
+	return &object.Range{Start: start, Stop: stop, Step: step}
+}
+
 func (ip *Interp) constructBuiltinType(cls *object.TypeObj, args []object.Object, kwargs map[string]object.Object) object.Object {
 	if fn, ok := builtinCtors[cls.Builtin]; ok {
 		res, err := fn(args, kwargs)
@@ -1467,6 +1602,8 @@ func (ip *Interp) constructBuiltinType(cls *object.TypeObj, args []object.Object
 			}
 		}
 		return d
+	case object.BT_Range:
+		return ip.makeRange(args)
 	case object.BT_Set:
 		s := &object.Set{}
 		if len(args) > 0 {

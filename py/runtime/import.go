@@ -14,6 +14,7 @@ package runtime
 // 查找顺序（与 CPython 简化对齐）：sys.modules → 宿主注入 → 内置 → 文件/包/命名空间 → 惰性探测重试。
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,11 +33,11 @@ var moduleSpecType = &object.TypeObj{Name: "ModuleSpec", Dict: map[string]object
 type findKind int
 
 const (
-	findNone findKind = iota
-	findSource        // <dir>/x.py
-	findPackage       // <dir>/x/__init__.py
-	findNamespace     // <dir>/x（无 __init__.py，PEP 420）
-	findExtension     // <dir>/x.pyd / x*.pyd（C 扩展）
+	findNone      findKind = iota
+	findSource             // <dir>/x.py
+	findPackage            // <dir>/x/__init__.py
+	findNamespace          // <dir>/x（无 __init__.py，PEP 420）
+	findExtension          // <dir>/x.pyd / x*.pyd（C 扩展）
 )
 
 type findResult struct {
@@ -91,7 +92,7 @@ func (ip *Interp) importModule(name string) *object.Module {
 			return m
 		}
 	}
-	ip.raise(ip.excType("ModuleNotFoundError"), "No module named '%s'", name)
+	ip.raiseModuleNotFound(name, "No module named '%s'", name)
 	return nil
 }
 
@@ -136,7 +137,7 @@ func (ip *Interp) importSubmodule(full, parentName, sub string) *object.Module {
 			return m
 		}
 	}
-	ip.raise(ip.excType("ModuleNotFoundError"), "No module named '%s'; '%s' is not a package", full, parentName)
+	ip.raiseModuleNotFound(full, "No module named '%s'; '%s' is not a package", full, parentName)
 	return nil
 }
 
@@ -324,6 +325,10 @@ func (ip *Interp) loadModuleFromFile(name, path string) *object.Module {
 			}
 		}
 	}()
+	// 记录当前模块文件：错误信息里的行号/文件才对得上（原生函数抛错时尤其重要）
+	prevFile := ip.MainFile
+	ip.MainFile = path
+	defer func() { ip.MainFile = prevFile }()
 	for _, st := range m.Body {
 		ip.execStmt(st, env)
 	}
@@ -482,4 +487,14 @@ func resolveRelative(pkg string, level int) string {
 // loadModule 兼容旧调用名（旧代码/外部引用）。
 func (ip *Interp) loadModule(name string) *object.Module {
 	return ip.importModule(name)
+}
+
+// raiseModuleNotFound 抛 ModuleNotFoundError 并带上 CPython 的 .name 属性
+// （很多库写 `except ModuleNotFoundError as e: if e.name == "ssl"`
+func (ip *Interp) raiseModuleNotFound(name string, format string, a ...interface{}) {
+	msg := fmt.Sprintf(format, a...)
+	exc := object.NewException(ip.excType("ModuleNotFoundError"), &object.Str{V: msg})
+	exc.Dict["name"] = &object.Str{V: name}
+	exc.Dict["path"] = object.None
+	panic(&PyError{Exc: exc, Frames: append([]string{}, ip.Frames...), File: ip.MainFile})
 }

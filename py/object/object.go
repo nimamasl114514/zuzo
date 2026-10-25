@@ -19,14 +19,14 @@ type Object interface {
 
 // TypeObj 类型对象（Python 的 type 实例）
 type TypeObj struct {
-	Name    string
-	Bases   []*TypeObj
+	Name      string
+	Bases     []*TypeObj
 	MetaClass *TypeObj // 元类（class X(metaclass=M) 时记录 M；nil = type）
-	Dict    map[string]Object
-	mro     []*TypeObj
-	IsExc   bool // 是否异常类型
-	Module  string
-	Builtin int // 内置类型编号（0 = 用户类）
+	Dict      map[string]Object
+	mro       []*TypeObj
+	IsExc     bool // 是否异常类型
+	Module    string
+	Builtin   int // 内置类型编号（0 = 用户类）
 }
 
 // 内置类型编号
@@ -96,8 +96,8 @@ func (t *TypeObj) Type() *TypeObj {
 	}
 	return typeType
 }
-func (t *TypeObj) Repr() string   { return "<class '" + t.Name + "'>" }
-func (t *TypeObj) Str() string    { return t.Repr() }
+func (t *TypeObj) Repr() string { return "<class '" + t.Name + "'>" }
+func (t *TypeObj) Str() string  { return t.Repr() }
 
 // Name_ 返回类型名
 func (t *TypeObj) Name_() string { return t.Name }
@@ -658,24 +658,27 @@ func SortedKeys(keys []Object) []Object {
 // ==================== 导出类型别名（供运行时使用） ====================
 
 var (
-	TypeType    = typeType
-	NoneType    = noneType
-	BoolType    = boolType
-	IntType     = intType
-	FloatType   = floatType
-	StrType     = strType
-	BytesType   = bytesType
-	ListType    = listType
-	TupleType   = tupleType
-	DictType    = dictType
-	SetType     = setType
-	RangeType   = rangeType
-	SliceType   = sliceType
-	FuncType    = funcType
-	BuiltinType = builtinType
-	MethodType  = methodType
-	ModuleType  = moduleType
-	GenType     = genType
-	IterType    = iterType
-	ExcType     = excType
+	TypeType = typeType
+	NoneType = noneType
+	BoolType = boolType
+	IntType  = intType
+	// FrozenSetType：ABC 的 register 要求 isinstance(frozenset, type) == True，
+	// 所以这个名字必须绑定为类型对象而不是内建函数（_collections_abc.py:699）。
+	FrozenSetType = &TypeObj{Name: "frozenset", Bases: []*TypeObj{setType}, Builtin: BT_Set}
+	FloatType     = floatType
+	StrType       = strType
+	BytesType     = bytesType
+	ListType      = listType
+	TupleType     = tupleType
+	DictType      = dictType
+	SetType       = setType
+	RangeType     = rangeType
+	SliceType     = sliceType
+	FuncType      = funcType
+	BuiltinType   = builtinType
+	MethodType    = methodType
+	ModuleType    = moduleType
+	GenType       = genType
+	IterType      = iterType
+	ExcType       = excType
 )

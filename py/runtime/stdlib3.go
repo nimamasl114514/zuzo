@@ -172,6 +172,75 @@ func modSocket(ip *Interp) *object.Module {
 	m.Dict["SOL_SOCKET"] = &object.Int{V: 1}
 	m.Dict["SO_REUSEADDR"] = &object.Int{V: 2}
 	sockCls := &object.TypeObj{Name: "socket", Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}}
+	m.Dict["AF_UNSPEC"] = &object.Int{V: 0}
+	m.Dict["has_ipv6"] = object.TrueObj
+	m.Dict["AI_PASSIVE"] = &object.Int{V: 1}
+	m.Dict["AI_CANONNAME"] = &object.Int{V: 2}
+	m.Dict["AI_NUMERICHOST"] = &object.Int{V: 4}
+	m.Dict["IPPROTO_IP"] = &object.Int{V: 0}
+	m.Dict["SOCK_RAW"] = &object.Int{V: 3}
+	m.Dict["SO_KEEPALIVE"] = &object.Int{V: 8}
+	m.Dict["TCP_NODELAY"] = &object.Int{V: 1}
+	m.Dict["error"] = ip.excType("OSError")
+	m.Dict["IPPROTO_TCP"] = &object.Int{V: 6}
+	m.Dict["SHUT_RD"] = &object.Int{V: 0}
+	m.Dict["SHUT_WR"] = &object.Int{V: 1}
+	m.Dict["SHUT_RDWR"] = &object.Int{V: 2}
+	// http/client.py:887 用 socket._GLOBAL_DEFAULT_TIMEOUT 作为「未指定超时」的哨兵
+	globalDefaultTimeout := &object.Instance{Class: &object.TypeObj{Name: "_GLOBAL_DEFAULT_TIMEOUT", Dict: map[string]object.Object{}}, Dict: map[string]object.Object{}}
+	m.Dict["_GLOBAL_DEFAULT_TIMEOUT"] = globalDefaultTimeout
+	// socket 异常族（requests/urllib3 到处 except socket.error）
+	for _, n := range []string{"error", "timeout", "gaierror", "herror", "ConnectionError"} {
+		m.Dict[n] = ip.excType("OSError")
+	}
+	m.Dict["create_connection"] = bi("create_connection", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) == 0 {
+			ip.TypeError("create_connection() requires address")
+		}
+		addr := ip.ToSlice(a[0])
+		host := "localhost"
+		port := int64(0)
+		if len(addr) > 0 {
+			host = addr[0].Str()
+		}
+		if len(addr) > 1 {
+			port, _ = object.AsInt(addr[1])
+		}
+		conn, err := net.Dial("tcp", net.JoinHostPort(host, strconv.FormatInt(port, 10)))
+		if err != nil {
+			ip.raise(ip.excType("OSError"), "%v", err)
+		}
+		inst := &object.Instance{Class: sockCls, Dict: map[string]object.Object{}}
+		inst.Dict["_s"] = &sockHandle{conn: conn}
+		return inst, nil
+	})
+	m.Dict["getaddrinfo"] = bi("getaddrinfo", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) < 2 {
+			ip.TypeError("getaddrinfo() requires host and port")
+		}
+		host := a[0].Str()
+		port, _ := object.AsInt(a[1])
+		addrs, err := net.LookupHost(host)
+		if err != nil {
+			ip.raise(ip.excType("OSError"), "%v", err)
+		}
+		out := make([]object.Object, 0, len(addrs))
+		for _, ipStr := range addrs {
+			out = append(out, &object.Tuple{Items: []object.Object{
+				&object.Int{V: 2}, &object.Int{V: 1}, &object.Int{V: 6}, &object.Str{V: ""},
+				&object.Tuple{Items: []object.Object{&object.Str{V: ipStr}, &object.Int{V: port}}},
+			}})
+		}
+		return &object.List{Items: out}, nil
+	})
+	m.Dict["gethostname"] = bi("gethostname", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		h, err := os.Hostname()
+		if err != nil {
+			return &object.Str{V: "localhost"}, nil
+		}
+		return &object.Str{V: h}, nil
+	})
+
 	sockCls.Dict["__init__"] = bi("__init__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
 		if len(a) > 0 {
 			if inst, ok := a[0].(*object.Instance); ok {
@@ -333,7 +402,13 @@ func (s *sockHandle) Str() string           { return "<socket>" }
 func modUrllib(ip *Interp) *object.Module {
 	m := newModule("urllib")
 	m.Dict["request"] = modUrllibRequest(ip)
-	m.Dict["parse"] = modUrllibParse(ip)
+	// 走 factory（而不是直接调 modUrllibParse）：stdlib_patch.go 会给
+	// urllib.parse 包一层补 urlsplit/urljoin/parse_qs，绕过 factory 就吃不到补丁。
+	if init, ok := builtinModuleInits["urllib.parse"]; ok {
+		m.Dict["parse"] = init(ip)
+	} else {
+		m.Dict["parse"] = modUrllibParse(ip)
+	}
 	return m
 }
 
@@ -402,6 +477,7 @@ func modUrllibParse(ip *Interp) *object.Module {
 		}
 		return &object.Str{V: strings.Join(parts, "&")}, nil
 	})
+	addUrllibParseExtras(ip, m) // patch 直接生效（不依赖 registerStdlibPatch 的包装顺序）
 	return m
 }
 
