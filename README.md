@@ -20,6 +20,7 @@
 - **内嵌 Python**：自研解析器 + [gopapy v2](https://github.com/tamnd/gopapy) 双轨（Python 3.14 语法），运行时不依赖 CPython
 - **混合语言 `.hypy`**：单文件内 `##ZUZO` / `##PY` 分块，两个运行时按名字双向同步变量
 - **内置能力**：HTTP 服务端、浏览器自动化（chromedp）、CFFI / WASM FFI（wazero）、并发原语、正则、编码、集合库
+- **字符串标准库**：内建 `文本` 命名空间（110 成员：大小写 / 裁剪 / 查找替换 / 分割 / 对齐 / 判定 / 子串 / 中文友好 / UTF-8・编码・正则）+ `libs/strings` 高层封装（统计 / 表格 / 命名法 / 模板 / 千分位）
 - **工具链**：`zpm` 包管理器、类型检查 `--check`、拓扑指纹分析 `--analyze`、影子模式 `--shadow`、CPU 采样 `ZUZO_CPUPROFILE`
 
 ## 快速开始
@@ -111,6 +112,7 @@ go test ./...         # Go 单测（含原生循环、SAP、混合切块）
 ## 文档
 
 - [语言概览](docs/language-overview.md)
+- [字符串标准库](docs/string-library.md)
 - [混合语言](docs/mixed-language.md)
 - [Python 支持](docs/python-support.md)
 - [Python 前端（gopapy 双轨）](docs/python-parser.md)

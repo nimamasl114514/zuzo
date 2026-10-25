@@ -1286,20 +1286,20 @@ func registerBuiltins(env *object.Environment) {
 		"连接": builtinJoin,
 		"包含": builtinContains,
 
-		// --- 字符串处理（builtins_strings.go） ---
-		"大写":  builtinToUpper,
-		"小写":  builtinToLower,
-		"前缀":  builtinHasPrefix,
-		"后缀":  builtinHasSuffix,
-		"查找":  builtinIndex,
-		"替换":  builtinReplace,
-		"分割":  builtinSplit,
-		"去空白": builtinTrimSpace,
-		"裁剪":  builtinTrim,
-		"重复":  builtinRepeat,
-		"计数":  builtinCount,
-		"分词":  builtinFields,
-		"取字符": builtinCharAt,
+		// --- 字符串处理（第18轮重构：实现收敛到 strlib_*.go，此处仅保留旧全局名别名） ---
+		"大写":  strUpper,
+		"小写":  strLower,
+		"前缀":  strHasPrefix,
+		"后缀":  strHasSuffix,
+		"查找":  strIndex,
+		"替换":  strReplace,
+		"分割":  strSplit,
+		"去空白": strTrimSpace,
+		"裁剪":  strTrim,
+		"重复":  strRepeat,
+		"计数":  strCount,
+		"分词":  strFields,
+		"取字符": strCharAt,
 		"格式化": builtinFormat,
 
 		// --- 哈希（键遍历；支持中文键） ---
@@ -1489,6 +1489,9 @@ func registerBuiltins(env *object.Environment) {
 			env.Set(name, b)
 		}
 	}
+
+	// 字符串标准库命名空间（strlib_core.go）：文本.大写(...) / 文本.子串(...)
+	registerStringLib(env)
 }
 
 // ==================== 通用内置函数 ====================
