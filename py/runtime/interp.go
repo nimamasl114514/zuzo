@@ -147,7 +147,6 @@ func (ip *Interp) ValueError(format string, a ...interface{}) {
 
 // NameErr 名字错误
 func (ip *Interp) NameErr(name string) {
-	fmt.Fprintf(os.Stderr, "NAMEERR %s @ %s\n", name, ip.MainFile)
 	ip.raise(ip.excType("NameError"), "name '%s' is not defined", name)
 }
 
@@ -167,7 +166,6 @@ func (ip *Interp) KeyErr(key object.Object) {
 
 // AttrErr 属性错误
 func (ip *Interp) AttrErr(o object.Object, attr string) {
-	fmt.Fprintf(os.Stderr, "ATTRERR %s.%s @ %s\n", object.TypeName(o), attr, ip.MainFile)
 	ip.raise(ip.excType("AttributeError"), "'%s' object has no attribute '%s'", object.TypeName(o), attr)
 }
 

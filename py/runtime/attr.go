@@ -1,8 +1,6 @@
 package runtime
 
 import (
-	"fmt"
-	"os"
 	"strings"
 
 	"zuzo/py/ast"
@@ -825,7 +823,6 @@ func (ip *Interp) GetItem(o object.Object, idx object.Object) object.Object {
 		}
 		p, ok := normalizeIndex(i, len(v.Items))
 		if !ok {
-			fmt.Fprintf(os.Stderr, "GETITEM-OOB idx=%d len=%d file=%s\n", i, len(v.Items), ip.MainFile)
 			ip.IndexErr("tuple index out of range")
 		}
 		return v.Items[p]

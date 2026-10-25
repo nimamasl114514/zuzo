@@ -444,6 +444,27 @@ func (ip *Interp) opMul(a, b object.Object) object.Object {
 			return &object.Str{V: repeatString(x.V, n)}
 		}
 	}
+	if x, ok := a.(*object.Bytes); ok {
+		if n, ok2 := object.AsInt(b); ok2 {
+			if n <= 0 {
+				return &object.Bytes{V: []byte{}}
+			}
+			out := make([]byte, 0, len(x.V)*int(n))
+			for i := int64(0); i < n; i++ {
+				out = append(out, x.V...)
+			}
+			return &object.Bytes{V: out}
+		}
+	}
+	if x, ok := a.(*object.ByteArray); ok {
+		if n, ok2 := object.AsInt(b); ok2 {
+			out := make([]byte, 0, len(x.V)*int(n))
+			for i := int64(0); i < n; i++ {
+				out = append(out, x.V...)
+			}
+			return &object.ByteArray{V: out}
+		}
+	}
 	if x, ok := a.(*object.List); ok {
 		if n, ok2 := object.AsInt(b); ok2 {
 			items := make([]object.Object, 0, len(x.Items)*int(n))

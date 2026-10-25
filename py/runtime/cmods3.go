@@ -99,7 +99,14 @@ func parseStructFmt(f string) (binary.ByteOrder, []structItem, error) {
 		default:
 			return nil, nil, fmt.Errorf("bad char in struct format: %q", string(c))
 		}
-		items = append(items, structItem{code: c, size: sz * count})
+		// 语义区别：4s/4x 的 4 是「字节长度」，4H 的 4 是「重复 4 次」
+		if c == 's' || c == 'x' || c == 'p' {
+			items = append(items, structItem{code: c, size: sz * count})
+		} else {
+			for k := 0; k < count; k++ {
+				items = append(items, structItem{code: c, size: sz})
+			}
+		}
 		i++
 	}
 	return order, items, nil
