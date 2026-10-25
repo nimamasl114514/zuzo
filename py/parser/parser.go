@@ -404,11 +404,22 @@ func (p *Parser) parseParams() *ast.Params {
 		if p.at(token.DOUBLESTAR) {
 			p.next()
 			ps.Kwarg = p.expect(token.NAME).Literal
+			// **kwargs: T —— 变长关键字参数的类型注解（运行时不用，解析后丢弃）。
+			// 实锤：charset_normalizer/legacy.py:19 `**kwargs: Any` 缺此分支会报「期望 )」。
+			if p.at(token.COLON) {
+				p.next()
+				_ = p.parseTestListNoTuple()
+			}
 		} else if p.at(token.STAR) {
 			p.next()
 			kwonly = true
 			if p.at(token.NAME) {
 				ps.Vararg = p.next().Literal
+				// *args: T 同上
+				if p.at(token.COLON) {
+					p.next()
+					_ = p.parseTestListNoTuple()
+				}
 			}
 		} else {
 			arg := &ast.Arg{Name: p.expect(token.NAME).Literal}

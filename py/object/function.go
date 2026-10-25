@@ -2,14 +2,24 @@ package object
 
 import (
 	"math"
+	sysrt "runtime"
+	"strconv"
+	"strings"
+	"sync"
 
 	"zuzo/py/ast"
 )
 
+// runtimeStack 包一层，避免与调用点的变量名冲突。
+func runtimeStack(buf []byte) int { return sysrt.Stack(buf, false) }
+
 // Function 用户定义函数
 type Function struct {
-	Name        string
-	QualName    string
+	Name     string
+	QualName string
+	// File 函数定义时所在的源文件（错误回溯用；空 = 用解释器当前主文件）。
+	// 模块加载完会恢复 MainFile，只靠 MainFile 会把内层函数错标成外层模块文件。
+	File        string
 	Params      *ast.Params
 	Body        []ast.Stmt
 	LambdaBody  ast.Expr // 非 nil 表示 lambda（直接求值表达式）
@@ -411,6 +421,14 @@ func (t *PyThread) Str() string    { return t.Repr() }
 // PyLock 互斥锁
 type PyLock struct {
 	Ch chan struct{}
+	// Reentrant = true 时按 CPython threading.RLock 语义实现：
+	// 同一执行流重复 acquire 只加计数，不阻塞（非重入 Lock 第二次 acquire 会死锁）。
+	// logging 的 _acquireLock 与 Handler.acquire 都是 RLock 且存在嵌套调用，
+	// 旧实现把 RLock 等同 Lock 会导致进程退出阶段（logging.shutdown）永久阻塞。
+	Reentrant bool
+	mu        sync.Mutex
+	owner     uint64
+	depth     int
 }
 
 // LockType 锁类型对象
@@ -426,15 +444,78 @@ func NewPyLock() *PyLock {
 	return l
 }
 
-// Acquire 加锁
-func (l *PyLock) Acquire() { l.Ch <- struct{}{} }
-
-// Release 解锁
-func (l *PyLock) Release() {
-	select {
-	case <-l.Ch:
-	default:
+// Acquire 加锁（Reentrant 时同执行流可重入）。
+func (l *PyLock) Acquire() {
+	if !l.Reentrant {
+		l.Ch <- struct{}{}
+		return
 	}
+	id := currentGoID()
+	l.mu.Lock()
+	if l.depth > 0 && l.owner == id {
+		l.depth++
+		l.mu.Unlock()
+		return
+	}
+	l.mu.Unlock()
+	l.Ch <- struct{}{} // 阻塞式抢占底层锁
+	l.mu.Lock()
+	l.owner = id
+	l.depth = 1
+	l.mu.Unlock()
+}
+
+// Release 解锁（Reentrant 时递减计数，归零才真正释放）。
+func (l *PyLock) Release() {
+	if !l.Reentrant {
+		select {
+		case <-l.Ch:
+		default:
+		}
+		return
+	}
+	id := currentGoID()
+	l.mu.Lock()
+	if l.depth == 0 || l.owner != id {
+		l.mu.Unlock()
+		return
+	}
+	l.depth--
+	last := l.depth == 0
+	if last {
+		l.owner = 0
+	}
+	l.mu.Unlock()
+	if last {
+		select {
+		case <-l.Ch:
+		default:
+		}
+	}
+}
+
+// NewPyRLock 构造可重入锁（threading.RLock）。
+func NewPyRLock() *PyLock {
+	return &PyLock{Ch: make(chan struct{}, 1), Reentrant: true}
+}
+
+// currentGoID 返回当前 goroutine 的运行时 id（用于可重入锁的持有者判定）。
+func currentGoID() uint64 {
+	var buf [64]byte
+	n := runtimeStack(buf[:])
+	s := string(buf[:n])
+	const p = "goroutine "
+	if i := strings.Index(s, p); i >= 0 {
+		j := i + len(p)
+		k := j
+		for k < len(s) && s[k] >= '0' && s[k] <= '9' {
+			k++
+		}
+		if v, err := strconv.ParseUint(s[j:k], 10, 64); err == nil {
+			return v
+		}
+	}
+	return 1
 }
 
 // FieldSpec dataclasses.field 的返回物

@@ -168,6 +168,22 @@ func (t *TypeObj) MRO() []*TypeObj {
 	}
 	lists = append(lists, append([]*TypeObj{}, t.Bases...))
 	res = append(res, merge(lists)...)
+	// CPython 语义：任何类的 MRO 必以 object 收尾（object 自身除外）。
+	// 旧实现在 Bases 为空时（如 typing.MutableMapping 这类占位 TypeObj）MRO 只有自己，
+	// 导致 `class X(typing.MutableMapping[...])` 里的 super().__init__() 找不到 object.__init__，
+	// 抛 AttributeError: 'super' object has no attribute '__init__'（urllib3._collections:87 实锤）。
+	if t != ObjectType {
+		hasObj := false
+		for _, c := range res {
+			if c == ObjectType {
+				hasObj = true
+				break
+			}
+		}
+		if !hasObj {
+			res = append(res, ObjectType)
+		}
+	}
 	t.mro = res
 	return res
 }

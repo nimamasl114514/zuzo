@@ -71,6 +71,7 @@ func (ip *Interp) importModule(name string) *object.Module {
 			m.Name = name
 		}
 		ip.registerModule(name, m)
+		ip.afterBuiltinInit(name, m)
 		// import a.b 要同时把 b 挂到 a 的属性上（CPython 行为）
 		if i := strings.LastIndex(name, "."); i > 0 {
 			parent := ip.importModule(name[:i])
@@ -149,7 +150,10 @@ func (ip *Interp) synthBuiltinChild(full string, parent *object.Module, sub stri
 			cur = prev
 			continue
 		}
-		m := &object.Module{Name: cur.Name + "." + part, Dict: map[string]object.Object{}}
+		// __synth__ 标记：这是为内置父模块合成的空占位子模块，不携带任何真实成员。
+		// from-import 探测必须能识别它，否则「from X import 缺失名」会静默拿到一个空 module
+		// （实锤：from json import JSONDecodeError → base #1 is module）。
+		m := &object.Module{Name: cur.Name + "." + part, Dict: map[string]object.Object{"__synth__": object.TrueObj}}
 		cur.Dict[part] = m
 		cur = m
 	}
@@ -170,6 +174,31 @@ func (ip *Interp) registerModule(name string, m *object.Module) {
 	ip.Modules[name] = m
 	if ip.SysModules != nil {
 		ip.SysModules.Set(&object.Str{V: name}, m)
+	}
+}
+
+// afterBuiltinInit 在内置模块构造并注册之后做「后置接续」（此时同模块名已可安全被循环 import）。
+// 目前只用于 os：CPython 的 pathlib.py 把 os.path 当 _flavour 用，需要完整 ntpath 语义
+// （splitroot / splitdrive / normcase / UNC 处理）——Go 手写简化版撑不住，改成直载 ntpath.py。
+func (ip *Interp) afterBuiltinInit(name string, m *object.Module) {
+	if name != "os" {
+		return
+	}
+	leaf := "posixpath"
+	if isWindows() {
+		leaf = "ntpath"
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			// ntpath 加载失败（缺依赖等）：保留 Go 版 os.path 作为降级，不阻断主链
+		}
+	}()
+	if pm := ip.importModule(leaf); pm != nil {
+		m.Dict["path"] = pm
+		if ip.SysModules != nil {
+			ip.SysModules.Set(&object.Str{V: "os.path"}, pm)
+		}
+		ip.Modules["os.path"] = pm
 	}
 }
 
@@ -437,8 +466,17 @@ func (ip *Interp) execImportFrom(node *ast.ImportFrom, env *object.Env) {
 		// 尝试子模块：from a import b → a.b
 		subErr := ip.protect(func() { _ = ip.importModule(moduleName + "." + al.Name) })
 		if sm, ok := ip.Modules[moduleName+"."+al.Name]; ok {
-			env.Set(name, sm)
-			continue
+			// 合成占位子模块（__synth__）不是真子模块，不能拿来顶替 from-import 的名字：
+			// 否则「from json import JSONDecodeError」会拿到空 module，ImportError 被静默吞掉。
+			if _, isSynth := sm.Dict["__synth__"]; isSynth {
+				delete(ip.Modules, moduleName+"."+al.Name)
+				if ip.SysModules != nil {
+					ip.SysModules.Delete(&object.Str{V: moduleName + "." + al.Name})
+				}
+			} else {
+				env.Set(name, sm)
+				continue
+			}
 		}
 		if subErr != nil {
 			ip.raise(ip.excType("ImportError"), "cannot import name '%s' from '%s' (%v)", al.Name, moduleName, subErr)

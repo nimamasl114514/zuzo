@@ -32,6 +32,30 @@ func modZlib(ip *Interp) *object.Module {
 	m.Dict["MAX_WBITS"] = &object.Int{V: 15}
 	m.Dict["DEFLATED"] = &object.Int{V: 8}
 	m.Dict["DEF_MEM_LEVEL"] = &object.Int{V: 8}
+	// zlib.error：urllib3 的解压链 except zlib.error 会直接裸引用，缺了就导入失败
+	m.Dict["error"] = ip.excType("zlib.error")
+	m.Dict["decompressobj"] = bi("decompressobj", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		wbits := int64(15)
+		if len(a) > 0 {
+			wbits, _ = object.AsInt(a[0])
+		}
+		cls := &object.TypeObj{Name: "Decompress", Dict: map[string]object.Object{}}
+		inst := &object.Instance{Class: cls, Dict: map[string]object.Object{"unused_data": &object.Bytes{}, "unconsumed_tail": &object.Bytes{}, "eof": object.GetBool(false)}}
+		inst.Dict["decompress"] = bi("decompress", func(x []object.Object, y map[string]object.Object) (object.Object, error) {
+			if len(x) == 0 {
+				return &object.Bytes{}, nil
+			}
+			out, err := decompressByWBits(pyRawBytes(x[0]), int(wbits))
+			if err != nil {
+				ip.raise(ip.excType("zlib.error"), "%v", err)
+			}
+			return &object.Bytes{V: out}, nil
+		})
+		inst.Dict["flush"] = bi("flush", func(x []object.Object, y map[string]object.Object) (object.Object, error) {
+			return &object.Bytes{}, nil
+		})
+		return inst, nil
+	})
 
 	b2b := func(o object.Object) []byte {
 		switch v := o.(type) {
@@ -158,4 +182,23 @@ func modGzip(ip *Interp) *object.Module {
 		return &object.Bytes{V: out}, nil
 	})
 	return m
+}
+
+// decompressByWBits 按 zlib 的 wbits 口径解压：15=zlib 容器 / 31=gzip 容器 / -15=裸 deflate。
+func decompressByWBits(data []byte, wbits int) ([]byte, error) {
+	var r io.ReadCloser
+	var err error
+	switch {
+	case wbits >= 24 && wbits <= 31:
+		r, err = gzip.NewReader(bytes.NewReader(data))
+	case wbits < 0:
+		r = flate.NewReader(bytes.NewReader(data))
+	default:
+		r, err = zlib.NewReader(bytes.NewReader(data))
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
 }

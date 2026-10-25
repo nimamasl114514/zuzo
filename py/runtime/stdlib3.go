@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,31 @@ func registerStdlib3(ip *Interp) {
 var threadCounter int64
 
 // ==================== threading ====================
+
+// pyThreadIdent 返回当前执行流的标识（CPython threading.get_ident 口径）。
+// zuzo 用 goroutine 模拟线程，这里用线程 goroutine 的运行时 id 作近似；
+// 取不到时退回 1（单线程语义，logging 只拿它当记录字段）。
+func pyThreadIdent() uint64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	// 格式："goroutine 123 [running]:"
+	s := string(buf[:n])
+	const p = "goroutine "
+	if i := strings.Index(s, p); i >= 0 {
+		j := i + len(p)
+		k := j
+		for k < len(s) && s[k] >= '0' && s[k] <= '9' {
+			k++
+		}
+		if v, err := strconv.ParseUint(s[j:k], 10, 64); err == nil {
+			return v
+		}
+	}
+	return 1
+}
+
+// sockDefaultTimeout 对应 socket.setdefaulttimeout 的全局默认值。
+var sockDefaultTimeout object.Object = object.None
 
 func modThreading(ip *Interp) *object.Module {
 	m := newModule("threading")
@@ -119,10 +145,31 @@ func modThreading(ip *Interp) *object.Module {
 		return object.FalseObj, nil
 	})
 	m.Dict["Thread"] = cls
+	// get_ident / get_native_id / main_thread：logging.LogRecord.__init__（logging/__init__.py:346）
+	// 模块级就取 threading.get_ident()，据此填 record.thread / record.threadName。
+	m.Dict["get_ident"] = bi("get_ident", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return &object.Int{V: int64(pyThreadIdent())}, nil
+	})
+	m.Dict["get_native_id"] = m.Dict["get_ident"]
+	m.Dict["main_thread"] = bi("main_thread", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if v, ok := m.Dict["_main_thread"].(*object.Instance); ok {
+			return v, nil
+		}
+		inst := &object.Instance{Class: cls, Dict: map[string]object.Object{}}
+		inst.Dict["name"] = &object.Str{V: "MainThread"}
+		m.Dict["_main_thread"] = inst
+		return inst, nil
+	})
+	m.Dict["TIMEOUT_MAX"] = &object.Float{V: 1e9}
+	m.Dict["local"] = &object.TypeObj{Name: "local", Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}}
 	m.Dict["Lock"] = bi("Lock", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
 		return object.NewPyLock(), nil
 	})
-	m.Dict["RLock"] = m.Dict["Lock"]
+	// RLock 必须可重入（CPython 语义）：logging 的 _acquireLock / Handler.acquire 会嵌套调用，
+	// 旧实现复用 Lock（channel 非重入）→ 退出阶段 logging.shutdown 永久阻塞。
+	m.Dict["RLock"] = bi("RLock", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return object.NewPyRLock(), nil
+	})
 	m.Dict["current_thread"] = bi("current_thread", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
 		inst := &object.Instance{Class: cls, Dict: map[string]object.Object{}}
 		inst.Dict["name"] = &object.Str{V: "MainThread"}
@@ -182,6 +229,26 @@ func modSocket(ip *Interp) *object.Module {
 	m.Dict["SO_KEEPALIVE"] = &object.Int{V: 8}
 	m.Dict["TCP_NODELAY"] = &object.Int{V: 1}
 	m.Dict["error"] = ip.excType("OSError")
+	// getdefaulttimeout / setdefaulttimeout / timeout：urllib3/util/timeout.py:6 模块级导入，
+	// socket.timeout 在 CPython 3.10+ 是 TimeoutError 的别名。
+	m.Dict["timeout"] = ip.excType("TimeoutError")
+	m.Dict["gaierror"] = ip.excType("OSError")
+	m.Dict["herror"] = ip.excType("OSError")
+	m.Dict["getdefaulttimeout"] = bi("getdefaulttimeout", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if sockDefaultTimeout == nil {
+			return object.None, nil
+		}
+		return sockDefaultTimeout, nil
+	})
+	m.Dict["setdefaulttimeout"] = bi("setdefaulttimeout", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) == 0 || a[0] == object.None {
+			sockDefaultTimeout = object.None
+			return object.None, nil
+		}
+		sockDefaultTimeout = a[0]
+		return object.None, nil
+	})
+
 	m.Dict["IPPROTO_TCP"] = &object.Int{V: 6}
 	m.Dict["SHUT_RD"] = &object.Int{V: 0}
 	m.Dict["SHUT_WR"] = &object.Int{V: 1}
@@ -412,20 +479,112 @@ func modUrllib(ip *Interp) *object.Module {
 	return m
 }
 
+// alwaysSafe 是 CPython urllib.parse 里永远不编码的字节集（RFC 3986 unreserved）。
+const alwaysSafe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-~"
+
+// pyQuoteBytes 按 CPython quote_from_bytes 口径做百分号编码。
+func pyQuoteBytes(b []byte, safe string) string {
+	var sb strings.Builder
+	for _, c := range b {
+		if strings.IndexByte(alwaysSafe, c) >= 0 || strings.IndexByte(safe, c) >= 0 {
+			sb.WriteByte(c)
+		} else {
+			sb.WriteString(fmt.Sprintf("%%%02X", c))
+		}
+	}
+	return sb.String()
+}
+
+// pyRawBytes 把 str/bytes/bytearray 统一解成字节切片。
+func pyRawBytes(o object.Object) []byte {
+	switch v := o.(type) {
+	case *object.Bytes:
+		return v.V
+	case *object.ByteArray:
+		return v.V
+	}
+	return []byte(o.Str())
+}
+
 func modUrllibParse(ip *Interp) *object.Module {
 	m := newModule("urllib.parse")
+	// quote / quote_from_bytes 走同一实现：CPython 的 always_safe = 字母数字 + "_.-~"，
+	//		// safe 参数默认 "/"（旧实现把 / 硬编码进 safe 且漏了 ~，与 CPython 不一致）。
 	m.Dict["quote"] = bi("quote", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-		s := a[0].Str()
-		var sb strings.Builder
-		for _, b := range []byte(s) {
-			if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') ||
-				strings.ContainsRune("-_.~/", rune(b)) {
-				sb.WriteByte(b)
-			} else {
-				sb.WriteString(fmt.Sprintf("%%%02X", b))
+		safe := "/"
+		if len(a) > 1 {
+			safe = a[1].Str()
+		}
+		return &object.Str{V: pyQuoteBytes([]byte(a[0].Str()), safe)}, nil
+	})
+	m.Dict["quote_from_bytes"] = bi("quote_from_bytes", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		safe := "/"
+		if len(a) > 1 {
+			safe = a[1].Str()
+		}
+		return &object.Str{V: pyQuoteBytes(pyRawBytes(a[0]), safe)}, nil
+	})
+	m.Dict["unquote_to_bytes"] = bi("unquote_to_bytes", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		s := pyRawBytes(a[0])
+		out := make([]byte, 0, len(s))
+		for i := 0; i < len(s); i++ {
+			if s[i] == '%' && i+2 < len(s) {
+				if v, err := hex.DecodeString(string(s[i+1 : i+3])); err == nil {
+					out = append(out, v[0])
+					i += 2
+					continue
+				}
 			}
+			out = append(out, s[i])
+		}
+		return &object.Bytes{V: out}, nil
+	})
+	// unquote_plus / urlunparse：requests/compat.py:69 的 from urllib.parse import (...) 清单项
+	m.Dict["unquote_plus"] = bi("unquote_plus", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		s := ""
+		if len(a) > 0 {
+			s = a[0].Str()
+		}
+		s = strings.ReplaceAll(s, "+", " ")
+		var sb strings.Builder
+		for i := 0; i < len(s); i++ {
+			if s[i] == '%' && i+2 < len(s) {
+				if v, err := hex.DecodeString(s[i+1 : i+3]); err == nil {
+					sb.WriteByte(v[0])
+					i += 2
+					continue
+				}
+			}
+			sb.WriteByte(s[i])
 		}
 		return &object.Str{V: sb.String()}, nil
+	})
+	m.Dict["urlunparse"] = bi("urlunparse", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		parts := ip.ToSlice(a[0])
+		get := func(i int) string {
+			if i < len(parts) {
+				return parts[i].Str()
+			}
+			return ""
+		}
+		// urlunparse 收 6 元组 (scheme, netloc, path, params, query, fragment)；
+		// params 非空时按 CPython 口径并回 path。
+		path := get(2)
+		if params := get(3); params != "" {
+			path = path + ";" + params
+		}
+		return &object.Str{V: joinURL(get(0), get(1), path, get(4), get(5))}, nil
+	})
+	// urldefrag：requests/compat.py:69 模块级 from urllib.parse import urldefrag
+	m.Dict["urldefrag"] = bi("urldefrag", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		u := ""
+		if len(a) > 0 {
+			u = a[0].Str()
+		}
+		if i := strings.IndexByte(u, '#'); i >= 0 {
+			return &object.Tuple{Items: []object.Object{&object.Str{V: u[:i]}, &object.Str{V: u[i+1:]}}}, nil
+		}
+		return &object.Tuple{Items: []object.Object{&object.Str{V: u}, &object.Str{V: ""}}}, nil
 	})
 	m.Dict["quote_plus"] = bi("quote_plus", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
 		s := a[0].Str()
@@ -483,6 +642,73 @@ func modUrllibParse(ip *Interp) *object.Module {
 
 func modUrllibRequest(ip *Interp) *object.Module {
 	m := newModule("urllib.request")
+	// requests/compat.py:81 模块级 `from urllib.request import (getproxies,
+	// getproxies_environment, parse_http_list, proxy_bypass, proxy_bypass_environment)`
+	buildProxies := func() *object.Dict {
+		d := &object.Dict{}
+		for _, kv := range os.Environ() {
+			i := strings.Index(kv, "=")
+			if i <= 0 {
+				continue
+			}
+			k, v := strings.ToLower(kv[:i]), kv[i+1:]
+			if v == "" {
+				continue
+			}
+			switch k {
+			case "http_proxy":
+				d.Set(&object.Str{V: "http"}, &object.Str{V: v})
+			case "https_proxy":
+				d.Set(&object.Str{V: "https"}, &object.Str{V: v})
+			case "ftp_proxy":
+				d.Set(&object.Str{V: "ftp"}, &object.Str{V: v})
+			}
+		}
+		return d
+	}
+	m.Dict["getproxies"] = bi("getproxies", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return buildProxies(), nil
+	})
+	m.Dict["getproxies_environment"] = m.Dict["getproxies"]
+	m.Dict["proxy_bypass"] = bi("proxy_bypass", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return object.FalseObj, nil
+	})
+	m.Dict["proxy_bypass_environment"] = m.Dict["proxy_bypass"]
+	m.Dict["parse_http_list"] = bi("parse_http_list", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		src := ""
+		if len(a) > 0 {
+			src = a[0].Str()
+		}
+		var out []object.Object
+		cur := strings.Builder{}
+		inQuote := false
+		for i := 0; i < len(src); i++ {
+			c := src[i]
+			switch {
+			case inQuote:
+				if c == '\\' && i+1 < len(src) {
+					i++
+					cur.WriteByte(src[i])
+				} else if c == '"' {
+					inQuote = false
+				} else {
+					cur.WriteByte(c)
+				}
+			case c == '"':
+				inQuote = true
+			case c == ',':
+				out = append(out, &object.Str{V: strings.TrimSpace(cur.String())})
+				cur.Reset()
+			default:
+				cur.WriteByte(c)
+			}
+		}
+		if s := strings.TrimSpace(cur.String()); s != "" || len(out) > 0 {
+			out = append(out, &object.Str{V: s})
+		}
+		return &object.List{Items: out}, nil
+	})
+	m.Dict["Request"] = &object.TypeObj{Name: "Request", Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}}
 	m.Dict["urlopen"] = bi("urlopen", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
 		url := a[0].Str()
 		method := "GET"

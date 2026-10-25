@@ -31,11 +31,13 @@ type Interp struct {
 	MainFile    string
 	Depth       int
 	MaxDepth    int
-	Frames      []string
-	genStack    []*genCtx
-	currentEnv  *object.Env
-	kwOrder     []string // 最近一次调用的关键字参数顺序
-	ExcTypes    map[string]*object.TypeObj
+	// CurLine 当前正在执行的语句行号（只有错误回溯用，语句级更新，热路径开销可忽略）
+	CurLine    int
+	Frames     []string
+	genStack   []*genCtx
+	currentEnv *object.Env
+	kwOrder    []string // 最近一次调用的关键字参数顺序
+	ExcTypes   map[string]*object.TypeObj
 	// numCache 数字字面量解析结果缓存（key = AST 节点指针）。
 	// 循环条件/常量在热路径上每轮都会求值，重复 ParseInt 是主要开销之一；
 	// 用 sync.Map 因为 threading/asyncio 模块会在 goroutine 中并发求值。
@@ -238,6 +240,9 @@ func (ip *Interp) execBlock(stmts []ast.Stmt, env *object.Env) {
 }
 
 func (ip *Interp) execStmt(s ast.Stmt, env *object.Env) {
+	if s != nil {
+		ip.CurLine = s.Line()
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			if pe, ok := r.(*PyError); ok && pe.Line == 0 && s != nil {

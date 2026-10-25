@@ -11,6 +11,42 @@ import (
 	"zuzo/py/object"
 )
 
+// maketransKeyCode 把 maketrans 表的 key（单字符 str 或 int）解成码点。
+func maketransKeyCode(k object.Object) (int64, bool) {
+	switch v := k.(type) {
+	case *object.Int:
+		return v.V, true
+	case *object.Str:
+		r := []rune(v.V)
+		if len(r) != 1 {
+			return 0, false
+		}
+		return int64(r[0]), true
+	}
+	return 0, false
+}
+
+// strSliceRange 把 (start, end) 归一到 rune 下标区间 [0, n]（CPython 负数索引语义）。
+// 第三个返回值 false = 空区间（start > end）。
+func strSliceRange(start, end, n int) (int, int, bool) {
+	if start < 0 {
+		start += n
+	}
+	if end < 0 {
+		end += n
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end > n {
+		end = n
+	}
+	if start > end {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
 // registerMethods 注册内置类型方法
 func registerMethods(ip *Interp) {
 	// ---------------- str ----------------
@@ -22,6 +58,63 @@ func registerMethods(ip *Interp) {
 	})
 	regMethod(object.StrType, "casefold", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		return &object.Str{V: strings.ToLower(selfStr(args).V)}, nil
+	})
+	// maketrans / translate：pathlib.py:76 模块级就靠它把路径分隔符换成换行符
+	// （_SWAP_SEP_AND_NEWLINE = {'/': str.maketrans({'/': '\n', '\n': '/'}), ...}）
+	regMethod(object.StrType, "maketrans", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		out := &object.Dict{}
+		if len(args) >= 1 {
+			if d, ok := args[0].(*object.Dict); ok {
+				for i, k := range d.Keys {
+					if code, ok2 := maketransKeyCode(k); ok2 {
+						out.Set(&object.Int{V: code}, d.Vals[i])
+					}
+				}
+				return out, nil
+			}
+		}
+		// 两/三参数形式：maketrans(from, to[, delete])
+		var rx []rune
+		if len(args) >= 1 {
+			rx = []rune(args[0].Str())
+		}
+		var ry []rune
+		if len(args) >= 2 && args[1] != object.None {
+			ry = []rune(args[1].Str())
+		}
+		n := len(rx)
+		if len(ry) < n {
+			n = len(ry)
+		}
+		for i := 0; i < n; i++ {
+			out.Set(&object.Int{V: int64(rx[i])}, &object.Int{V: int64(ry[i])})
+		}
+		if len(args) >= 3 && args[2] != object.None {
+			for _, r := range args[2].Str() {
+				out.Set(&object.Int{V: int64(r)}, object.None)
+			}
+		}
+		return out, nil
+	})
+	regMethod(object.StrType, "translate", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		s := selfStr(args).V
+		var table *object.Dict
+		if len(args) > 1 {
+			table, _ = args[1].(*object.Dict)
+		}
+		var sb strings.Builder
+		for _, r := range s {
+			if table != nil {
+				if v, ok := table.Get(&object.Int{V: int64(r)}); ok {
+					if v != object.None {
+						sb.WriteString(v.Str())
+					}
+					continue
+				}
+			}
+			sb.WriteRune(r)
+		}
+		return &object.Str{V: sb.String()}, nil
 	})
 	regMethod(object.StrType, "strip", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		s := selfStr(args).V
@@ -165,11 +258,26 @@ func registerMethods(ip *Interp) {
 	regMethod(object.StrType, "rfind", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		s := selfStr(args).V
 		sub := args[1].Str()
-		idx := strings.LastIndex(s, sub)
+		rs := []rune(s)
+		start, end := 0, len(rs)
+		if len(args) > 2 {
+			v, _ := object.AsInt(args[2])
+			start = int(v)
+		}
+		if len(args) > 3 {
+			v, _ := object.AsInt(args[3])
+			end = int(v)
+		}
+		start, end, ok := strSliceRange(start, end, len(rs))
+		if !ok {
+			return &object.Int{V: -1}, nil
+		}
+		sub2 := string(rs[start:end])
+		idx := strings.LastIndex(sub2, sub)
 		if idx < 0 {
 			return &object.Int{V: -1}, nil
 		}
-		return &object.Int{V: int64(len([]rune(s[:idx])))}, nil
+		return &object.Int{V: int64(start + len([]rune(sub2[:idx])))}, nil
 	})
 	regMethod(object.StrType, "index", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		r, err := object.StrType.Dict["find"].(*object.Builtin).Fn(args, kw)
@@ -189,6 +297,26 @@ func registerMethods(ip *Interp) {
 		}
 		return &object.Int{V: int64(strings.Count(s, sub))}, nil
 	})
+	// startswith / endswith 必须支持 start/end（CPython 语义）。
+	// 反例：ntpath.isabs 用 `s.startswith(colon_sep, 1)` 判盘符绝对路径，
+	// 忽略 start 会让 os.path.isabs("C:/x") 错误返回 False。
+	mkStrBound := func(args []object.Object, s string) (string, bool) {
+		rs := []rune(s)
+		start, end := 0, len(rs)
+		if len(args) > 2 {
+			v, _ := object.AsInt(args[2])
+			start = int(v)
+		}
+		if len(args) > 3 {
+			v, _ := object.AsInt(args[3])
+			end = int(v)
+		}
+		start, end, ok := strSliceRange(start, end, len(rs))
+		if !ok {
+			return "", false
+		}
+		return string(rs[start:end]), true
+	}
 	regMethod(object.StrType, "startswith", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		s := selfStr(args).V
 		if len(args) < 2 {
@@ -202,8 +330,12 @@ func registerMethods(ip *Interp) {
 		} else {
 			prefixes = []string{args[1].Str()}
 		}
+		sub, ok := mkStrBound(args, s)
+		if !ok {
+			return object.FalseObj, nil
+		}
 		for _, p := range prefixes {
-			if strings.HasPrefix(s, p) {
+			if strings.HasPrefix(sub, p) {
 				return object.TrueObj, nil
 			}
 		}
@@ -222,8 +354,12 @@ func registerMethods(ip *Interp) {
 		} else {
 			suffixes = []string{args[1].Str()}
 		}
+		sub, ok := mkStrBound(args, s)
+		if !ok {
+			return object.FalseObj, nil
+		}
 		for _, p := range suffixes {
-			if strings.HasSuffix(s, p) {
+			if strings.HasSuffix(sub, p) {
 				return object.TrueObj, nil
 			}
 		}
@@ -276,6 +412,42 @@ func registerMethods(ip *Interp) {
 			}
 		}
 		return object.TrueObj, nil
+	})
+	regMethod(object.StrType, "isascii", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		for _, r := range selfStr(args).V {
+			if r > 127 {
+				return object.GetBool(false), nil
+			}
+		}
+		return object.GetBool(true), nil
+	})
+	regMethod(object.StrType, "isprintable", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		s := selfStr(args).V
+		if s == "" {
+			return object.GetBool(true), nil
+		}
+		for _, r := range s {
+			if r != ' ' && !unicode.IsPrint(r) {
+				return object.GetBool(false), nil
+			}
+		}
+		return object.GetBool(true), nil
+	})
+	regMethod(object.StrType, "isidentifier", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		s := selfStr(args).V
+		if s == "" {
+			return object.GetBool(false), nil
+		}
+		for i, r := range s {
+			if r == '_' || unicode.IsLetter(r) {
+				continue
+			}
+			if i > 0 && unicode.IsDigit(r) {
+				continue
+			}
+			return object.GetBool(false), nil
+		}
+		return object.GetBool(true), nil
 	})
 	regMethod(object.StrType, "isnumeric", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		return object.StrType.Dict["isdigit"].(*object.Builtin).Fn(args, kw)

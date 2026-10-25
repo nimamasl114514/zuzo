@@ -55,6 +55,9 @@ func modErrno(ip *Interp) *object.Module {
 		"ENOTSOCK": 88, "ECONNABORTED": 103, "ENOTCONN": 107, "EISCONN": 106,
 		"EMSGSIZE": 90, "EPROTONOSUPPORT": 93, "EOPNOTSUPP": 95,
 		"ESHUTDOWN": 108, "ECANCELED": 125,
+		// pathlib.py:18 `from errno import ELOOP` 与 os/文件系统相关的一批
+		"ELOOP": 114, "ENOTSUP": 129, "EOVERFLOW": 132, "ENOMSG": 122,
+		"EPROTOTYPE": 91, "ENOPROTOOPT": 92, "ENOBUFS": 105,
 	}
 	if isWindows() {
 		codes["EAGAIN"] = 11
@@ -68,6 +71,17 @@ func modErrno(ip *Interp) *object.Module {
 		codes["EADDRINUSE"] = 10048
 		codes["EADDRNOTAVAIL"] = 10049
 		codes["EAFNOSUPPORT"] = 10047
+		// Windows 真值（CPython 3.12 errno 实测）：ELOOP=10062 ENOTSUP=129 EOPNOTSUPP=10045
+		codes["ELOOP"] = 10062
+		codes["EOPNOTSUPP"] = 10045
+		codes["EMSGSIZE"] = 10040
+		codes["EPROTONOSUPPORT"] = 10043
+		codes["EPROTOTYPE"] = 10041
+		codes["ENOPROTOOPT"] = 10042
+		codes["ENOBUFS"] = 10055
+		codes["ENOTSOCK"] = 10038
+		codes["ENOTCONN"] = 10057
+		codes["EWOULDBLOCK"] = 10035
 		codes["ENOTSOCK"] = 10038
 		codes["ECONNABORTED"] = 10053
 		codes["ENOTCONN"] = 10057
@@ -166,8 +180,120 @@ func modIO(ip *Interp) *object.Module {
 
 	m.Dict["BytesIO"] = newBytesIOType(ip, "BytesIO")
 	m.Dict["StringIO"] = newStringIOType(ip, "StringIO")
+	m.Dict["TextIOWrapper"] = newTextIOWrapperType(ip)
+	// io.open：CPython 里是 builtins.open 的别名；pathlib.open / write_text 直接调它。
+	m.Dict["open"] = &object.Builtin{Name: "open", Fn: ip.builtinOpen}
+	// text_encoding：CPython 3.10+ 的 io.text_encoding，pathlib.write_text（pathlib.py:1046）在调。
+	m.Dict["text_encoding"] = bi("text_encoding", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) == 0 || a[0] == object.None {
+			return &object.Str{V: "locale"}, nil
+		}
+		return a[0], nil
+	})
 
 	return m
+}
+
+// newTextIOWrapperType 实现 io.TextIOWrapper 的最小面：包装一个字节流并提供文本读。
+// email/parser.py:103 `TextIOWrapper(fp, encoding='ascii', errors='surrogateescape')`
+// 是 urllib3 → http.client → email.parser 导入链上的硬依赖。
+func newTextIOWrapperType(ip *Interp) *object.TypeObj {
+	cls := &object.TypeObj{Name: "TextIOWrapper", Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}}
+	cls.Dict["__init__"] = bi("__init__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) < 2 {
+			ip.TypeError("TextIOWrapper() requires a buffer")
+		}
+		inst, ok := a[0].(*object.Instance)
+		if !ok {
+			return object.None, nil
+		}
+		inst.Dict["buffer"] = a[1]
+		enc := "utf-8"
+		if k != nil {
+			if v, ok2 := k["encoding"]; ok2 && v != object.None {
+				enc = v.Str()
+			}
+		}
+		if len(a) > 1 && enc == "utf-8" {
+			// 位置参数（buffer, encoding, errors, ...）
+			if len(a) > 2 && a[2] != object.None {
+				enc = a[2].Str()
+			}
+		}
+		inst.Dict["encoding"] = &object.Str{V: enc}
+		return object.None, nil
+	})
+	cls.Dict["read"] = bi("read", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		inst, _ := a[0].(*object.Instance)
+		if inst == nil {
+			return &object.Str{V: ""}, nil
+		}
+		buf := inst.Dict["buffer"]
+		var rest []object.Object
+		if len(a) > 1 {
+			rest = a[1:]
+		}
+		if inst2, ok := buf.(*object.Instance); ok {
+			if m, found := ip.findDunder(inst2.Class, "read"); found {
+				r := ip.Call(ip.bindMethod(inst2, m), rest, nil)
+				return textFromBytesLike(r), nil
+			}
+		}
+		return &object.Str{V: ""}, nil
+	})
+	cls.Dict["readline"] = bi("readline", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		inst, _ := a[0].(*object.Instance)
+		if inst == nil {
+			return &object.Str{V: ""}, nil
+		}
+		buf := inst.Dict["buffer"]
+		if inst2, ok := buf.(*object.Instance); ok {
+			if m, found := ip.findDunder(inst2.Class, "readline"); found {
+				r := ip.Call(ip.bindMethod(inst2, m), nil, nil)
+				return textFromBytesLike(r), nil
+			}
+		} else if m, found := ip.findDunder(buf.Type(), "readline"); found {
+			r := ip.Call(ip.bindMethod(buf, m), nil, nil)
+			return textFromBytesLike(r), nil
+		}
+		return &object.Str{V: ""}, nil
+	})
+	cls.Dict["detach"] = bi("detach", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		inst, _ := a[0].(*object.Instance)
+		if inst == nil {
+			return object.None, nil
+		}
+		buf := inst.Dict["buffer"]
+		inst.Dict["buffer"] = object.None
+		return buf, nil
+	})
+	cls.Dict["close"] = bi("close", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return object.None, nil
+	})
+	cls.Dict["flush"] = cls.Dict["close"]
+	cls.Dict["__enter__"] = bi("__enter__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return a[0], nil
+	})
+	cls.Dict["__exit__"] = bi("__exit__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return object.FalseObj, nil
+	})
+	return cls
+}
+
+// textFromBytesLike 把 bytes/bytearray/str 统一转成 str（TextIOWrapper 的文本化口径）。
+func textFromBytesLike(o object.Object) object.Object {
+	switch v := o.(type) {
+	case *object.Str:
+		return v
+	case *object.Bytes:
+		return &object.Str{V: string(v.V)}
+	case *object.ByteArray:
+		return &object.Str{V: string(v.V)}
+	}
+	if o == nil {
+		return &object.Str{V: ""}
+	}
+	return &object.Str{V: o.Str()}
 }
 
 // bufState 取实例内部的缓冲区状态。

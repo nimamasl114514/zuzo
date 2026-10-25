@@ -13,8 +13,10 @@ import (
 
 // registerStdlib2 注册 pathlib / logging / argparse / unittest
 func registerStdlib2(ip *Interp) {
-	builtinModuleInits["pathlib"] = modPathlib
-	builtinModuleInits["logging"] = modLogging
+	// [pather] 让 CPython pathlib.py 直载（分界点实验）: builtinModuleInits["pathlib"] = modPathlib
+	// [logger2] 让 CPython logging/__init__.py 直载（分界点实验）: builtinModuleInits["logging"] = modLogging
+	// traceback 走内置（挡 CPython traceback.py 的 PEP 701 f-string 同引号嵌套，zuzo 前端尚不支持）
+	builtinModuleInits["traceback"] = modTraceback
 	builtinModuleInits["argparse"] = modArgparse
 	builtinModuleInits["unittest"] = modUnittest
 	builtinModuleInits["shutil"] = modShutil

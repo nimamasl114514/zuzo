@@ -20,7 +20,28 @@ func (ip *Interp) builtinOpen(args []object.Object, kwargs map[string]object.Obj
 	if len(args) == 0 {
 		ip.TypeError("open() missing required argument 'file'")
 	}
-	path := args[0].Str()
+	// 文件对象的上下文管理器协议与常用方法挂在类上（with open(...) as f 依赖 __enter__/__exit__）
+	if _, ok := FileClass.Dict["__enter__"]; !ok {
+		FileClass.Dict["__enter__"] = bi("__enter__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			return a[0], nil
+		})
+		FileClass.Dict["__exit__"] = bi("__exit__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			if len(a) > 0 {
+				if inst, ok2 := a[0].(*object.Instance); ok2 {
+					if c, has := inst.Dict["close"]; has {
+						ip.Call(c, nil, nil)
+					}
+				}
+			}
+			return object.FalseObj, nil
+		})
+		FileClass.Dict["__iter__"] = bi("__iter__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			return a[0], nil
+		})
+	}
+	// 支持 pathlib.Path 等 PathLike：走 __fspath__ 协议拿真实路径
+	// （旧写 args[0].Str() 会把 Path 对象渲染成 "open <Path object>"，打开必失败）
+	path := osPathArg(ip, args[0])
 	mode := "r"
 	if len(args) > 1 {
 		mode = args[1].Str()

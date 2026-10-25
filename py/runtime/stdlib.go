@@ -7,12 +7,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"math"
 	"math/big"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,7 +51,12 @@ func registerBuiltinModules(ip *Interp) {
 
 // newModule 创建模块
 func newModule(name string) *object.Module {
-	return &object.Module{Name: name, Dict: map[string]object.Object{}}
+	// 每个模块必备 __doc__：CPython 的 operator.py 末尾就 `from _operator import __doc__`，
+	// 缺它会让 import operator 整体失败（urllib3 → importlib.metadata → operator 链实锤）。
+	return &object.Module{Name: name, Dict: map[string]object.Object{
+		"__doc__":  object.None,
+		"__name__": &object.Str{V: name},
+	}}
 }
 
 // bi 把 Go 函数包装为内置
@@ -270,6 +277,18 @@ func modTime(ip *Interp) *object.Module {
 	m.Dict["perf_counter"] = bi("perf_counter", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		return &object.Float{V: float64(time.Since(start).Nanoseconds()) / 1e9}, nil
 	})
+	// monotonic / monotonic_ns / process_time：queue.py:7 `from time import monotonic as time`。
+	m.Dict["monotonic"] = bi("monotonic", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		return &object.Float{V: float64(time.Since(start).Nanoseconds()) / 1e9}, nil
+	})
+	m.Dict["monotonic_ns"] = bi("monotonic_ns", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		return &object.Int{V: time.Since(start).Nanoseconds()}, nil
+	})
+	m.Dict["perf_counter_ns"] = bi("perf_counter_ns", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		return &object.Int{V: time.Since(start).Nanoseconds()}, nil
+	})
+	m.Dict["process_time"] = m.Dict["monotonic"]
+	m.Dict["thread_time"] = m.Dict["monotonic"]
 	m.Dict["sleep"] = bi("sleep", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		v, _ := object.AsFloat(args[0])
 		time.Sleep(time.Duration(v * float64(time.Second)))
@@ -328,6 +347,17 @@ func goTimeLayout(f string) string {
 
 func modJSON(ip *Interp) *object.Module {
 	m := newModule("json")
+	// JSONDecodeError：requests/compat.py:57 模块级 `from json import JSONDecodeError`，
+	// requests/exceptions.py:31 直接拿它当基类。CPython 里是 ValueError 子类。
+	jsonDecodeErr := &object.TypeObj{
+		Name:  "JSONDecodeError",
+		Bases: []*object.TypeObj{ip.excType("ValueError")},
+		Dict:  map[string]object.Object{},
+		IsExc: true,
+	}
+	m.Dict["JSONDecodeError"] = jsonDecodeErr
+	m.Dict["decoder"] = &object.Module{Name: "json.decoder", Dict: map[string]object.Object{"JSONDecodeError": jsonDecodeErr}}
+	m.Dict["encoder"] = &object.Module{Name: "json.encoder", Dict: map[string]object.Object{}}
 	m.Dict["dumps"] = bi("dumps", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		indent := 0
 		ensureAscii := true
@@ -734,20 +764,7 @@ func modRe(ip *Interp) *object.Module {
 		pat := args[0].Str()
 		s := args[1].Str()
 		re := compileRe(pat, 0)
-		all := re.FindAllStringSubmatch(s, -1)
-		var out []object.Object
-		for _, g := range all {
-			if len(g) == 1 {
-				out = append(out, &object.Str{V: g[0]})
-			} else {
-				items := make([]object.Object, 0, len(g)-1)
-				for _, x := range g[1:] {
-					items = append(items, &object.Str{V: x})
-				}
-				out = append(out, &object.Tuple{Items: items})
-			}
-		}
-		return &object.List{Items: out}, nil
+		return &object.List{Items: reFindallItems(re, s, -1)}, nil
 	})
 	m.Dict["sub"] = bi("sub", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		pat := args[0].Str()
@@ -816,21 +833,7 @@ func modRe(ip *Interp) *object.Module {
 			return makeMatch(ip, re, s, loc), nil
 		})
 		inst.Dict["findall"] = bi("findall", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-			s := a[0].Str()
-			all := re.FindAllStringSubmatch(s, -1)
-			var out []object.Object
-			for _, g := range all {
-				if len(g) == 1 {
-					out = append(out, &object.Str{V: g[0]})
-				} else {
-					items := make([]object.Object, 0, len(g)-1)
-					for _, x := range g[1:] {
-						items = append(items, &object.Str{V: x})
-					}
-					out = append(out, &object.Tuple{Items: items})
-				}
-			}
-			return &object.List{Items: out}, nil
+			return &object.List{Items: reFindallItems(re, a[0].Str(), -1)}, nil
 		})
 		inst.Dict["sub"] = bi("sub", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
 			repl := a[0].Str()
@@ -956,6 +959,25 @@ func modOS(ip *Interp) *object.Module {
 	// os.PathLike / fspath：pathlib 与大量库用它做路径协议判断
 	pathLikeCls := &object.TypeObj{Name: "PathLike", Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}}
 	m.Dict["PathLike"] = pathLikeCls
+	// PathLike.register(cls)：CPython 里 os.PathLike 是 ABCMeta，register 记虚拟子类。
+	// pathlib.py:798 模块级 `os.PathLike.register(PurePath)` 必须过，否则 pathlib 整体导入失败。
+	pathLikeCls.Dict["register"] = bi("register", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		target := object.Object(object.None)
+		for _, x := range a {
+			if t, ok := x.(*object.TypeObj); ok && t != pathLikeCls {
+				target = t
+			}
+		}
+		if target != object.None {
+			lst, _ := pathLikeCls.Dict["_virtual_subs"].(*object.List)
+			if lst == nil {
+				lst = &object.List{}
+				pathLikeCls.Dict["_virtual_subs"] = lst
+			}
+			lst.Items = append(lst.Items, target)
+		}
+		return target, nil
+	})
 	m.Dict["fspath"] = bi("fspath", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
 		if len(a) == 0 {
 			return &object.Str{V: ""}, nil
@@ -996,7 +1018,7 @@ func modOS(ip *Interp) *object.Module {
 	m.Dict["listdir"] = bi("listdir", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		dir := "."
 		if len(args) > 0 {
-			dir = args[0].Str()
+			dir = osPathArg(ip, args[0])
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -1010,14 +1032,14 @@ func modOS(ip *Interp) *object.Module {
 		return &object.List{Items: out}, nil
 	})
 	m.Dict["makedirs"] = bi("makedirs", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		err := os.MkdirAll(args[0].Str(), 0o755)
+		err := os.MkdirAll(osPathArg(ip, args[0]), 0o755)
 		if err != nil {
 			ip.raise(ip.excType("OSError"), "%v", err)
 		}
 		return object.None, nil
 	})
 	m.Dict["mkdir"] = bi("mkdir", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		if err := os.Mkdir(args[0].Str(), 0o755); err != nil {
+		if err := os.Mkdir(osPathArg(ip, args[0]), 0o755); err != nil {
 			ip.raise(ip.excType("OSError"), "%v", err)
 		}
 		return object.None, nil
@@ -1029,13 +1051,13 @@ func modOS(ip *Interp) *object.Module {
 		return object.None, nil
 	})
 	m.Dict["remove"] = bi("remove", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		if err := os.Remove(args[0].Str()); err != nil {
+		if err := os.Remove(osPathArg(ip, args[0])); err != nil {
 			ip.raise(ip.excType("OSError"), "%v", err)
 		}
 		return object.None, nil
 	})
 	m.Dict["rename"] = bi("rename", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		if err := os.Rename(args[0].Str(), args[1].Str()); err != nil {
+		if err := os.Rename(osPathArg(ip, args[0]), osPathArg(ip, args[1])); err != nil {
 			ip.raise(ip.excType("OSError"), "%v", err)
 		}
 		return object.None, nil
@@ -1058,8 +1080,173 @@ func modOS(ip *Interp) *object.Module {
 	}()
 	m.Dict["sep"] = &object.Str{V: string(filepath.Separator)}
 	m.Dict["linesep"] = &object.Str{V: "\n"}
+	// 平台标识与路径常量：pathlib.py:1420 / ntpath / posixpath 模块级全靠
+	if isWindows() {
+		m.Dict["name"] = &object.Str{V: "nt"}
+		m.Dict["altsep"] = &object.Str{V: "/"}
+		m.Dict["pathsep"] = &object.Str{V: ";"}
+		m.Dict["devnull"] = &object.Str{V: "nul"}
+	} else {
+		m.Dict["name"] = &object.Str{V: "posix"}
+		m.Dict["altsep"] = object.None
+		m.Dict["pathsep"] = &object.Str{V: ":"}
+		m.Dict["devnull"] = &object.Str{V: "/dev/null"}
+	}
+	m.Dict["curdir"] = &object.Str{V: "."}
+	m.Dict["pardir"] = &object.Str{V: ".."}
+	m.Dict["extsep"] = &object.Str{V: "."}
+	m.Dict["getpid"] = bi("getpid", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return &object.Int{V: int64(os.Getpid())}, nil
+	})
+	m.Dict["urandom"] = bi("urandom", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		n, _ := object.AsInt(a[0])
+		if n < 0 {
+			ip.TypeError("negative argument not allowed")
+		}
+		b := make([]byte, n)
+		if _, err := rand.Read(b); err != nil {
+			ip.raise(ip.excType("OSError"), "%v", err)
+		}
+		return &object.Bytes{V: b}, nil
+	})
+	m.Dict["access"] = bi("access", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := osPathArg(ip, a[0])
+		_, err := os.Stat(p)
+		return object.GetBool(err == nil), nil
+	})
+	m.Dict["cpu_count"] = bi("cpu_count", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return &object.Int{V: int64(runtime.NumCPU())}, nil
+	})
+	// os.stat_result / os.stat / os.lstat：CPython 的 ntpath.py / posixpath.py / pathlib.py 全靠它
+	// （ntpath.py:283 `hasattr(os.stat_result, 'st_reparse_tag')` 是模块导入期的硬依赖）
+	srCls := ensureStatResultCls(ip)
+	m.Dict["stat_result"] = srCls
+	m.Dict["supports_follow_symlinks"] = &object.Set{}
+	m.Dict["supports_dir_fd"] = &object.Set{}
+	m.Dict["supports_fd"] = &object.Set{}
+	m.Dict["stat"] = bi("stat", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return osStatPath(ip, a, true)
+	})
+	m.Dict["lstat"] = bi("lstat", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return osStatPath(ip, a, false)
+	})
 	m.Dict["path"] = modOSPath(ip)
 	return m
+}
+
+// ==================== os.stat_result ====================
+
+var statResultCls *object.TypeObj
+
+// ensureStatResultCls 惰性构造 os.stat_result：基类为 tuple（CPython 里它可以按位置索引），
+// 属性面提供 st_* 字段。故意不提供 st_reparse_tag —— 无 junction 支持，
+// 让 ntpath.py:283 的 hasattr 走 else 分支（isjunction 恒 False）。
+func ensureStatResultCls(ip *Interp) *object.TypeObj {
+	if statResultCls != nil {
+		return statResultCls
+	}
+	c := &object.TypeObj{Name: "stat_result", Bases: []*object.TypeObj{object.TupleType}, Dict: map[string]object.Object{}}
+	// CPython 元组索引口径：0 st_mode 1 st_ino 2 st_dev 3 st_nlink 4 st_uid 5 st_gid
+	// 6 st_size 7 st_atime 8 st_mtime 9 st_ctime
+	c.Dict["__getitem__"] = bi("__getitem__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		inst, ok := a[0].(*object.Instance)
+		if !ok {
+			return object.None, nil
+		}
+		n, _ := object.AsInt(a[1])
+		order := []string{"st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime", "st_mtime", "st_ctime"}
+		if n < 0 || int(n) >= len(order) {
+			ip.raise(ip.excType("IndexError"), "tuple index out of range")
+		}
+		if v, ok2 := inst.Dict[order[n]]; ok2 {
+			return v, nil
+		}
+		return &object.Int{V: 0}, nil
+	})
+	c.Dict["__repr__"] = bi("__repr__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		inst, _ := a[0].(*object.Instance)
+		g := func(n string) int64 {
+			if inst != nil {
+				if v, ok := inst.Dict[n].(*object.Int); ok {
+					return v.V
+				}
+			}
+			return 0
+		}
+		return &object.Str{V: fmt.Sprintf("os.stat_result(st_mode=%d, st_size=%d)", g("st_mode"), g("st_size"))}, nil
+	})
+	statResultCls = c
+	return c
+}
+
+// newStatResult 把 Go 的 os.FileInfo 包成 os.stat_result 实例。
+func newStatResult(ip *Interp, fi os.FileInfo) *object.Instance {
+	inst := &object.Instance{Class: ensureStatResultCls(ip), Dict: map[string]object.Object{}}
+	mode := int64(0o100000) // S_IFREG
+	if fi.IsDir() {
+		mode = 0o040000 // S_IFDIR
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		mode = 0o120000 // S_IFLNK
+	}
+	mode |= int64(fi.Mode().Perm())
+	t := fi.ModTime().Unix()
+	inst.Dict["st_mode"] = &object.Int{V: mode}
+	inst.Dict["st_ino"] = &object.Int{V: 0}
+	inst.Dict["st_dev"] = &object.Int{V: 0}
+	inst.Dict["st_nlink"] = &object.Int{V: 1}
+	inst.Dict["st_uid"] = &object.Int{V: 0}
+	inst.Dict["st_gid"] = &object.Int{V: 0}
+	inst.Dict["st_size"] = &object.Int{V: fi.Size()}
+	inst.Dict["st_atime"] = &object.Float{V: float64(t)}
+	inst.Dict["st_mtime"] = &object.Float{V: float64(t)}
+	inst.Dict["st_ctime"] = &object.Float{V: float64(t)}
+	inst.Dict["st_atime_ns"] = &object.Int{V: fi.ModTime().UnixNano()}
+	inst.Dict["st_mtime_ns"] = &object.Int{V: fi.ModTime().UnixNano()}
+	inst.Dict["st_ctime_ns"] = &object.Int{V: fi.ModTime().UnixNano()}
+	return inst
+}
+
+// osStatPath 实现 os.stat / os.lstat 共用的路径解析与错误映射。
+func osStatPath(ip *Interp, a []object.Object, follow bool) (object.Object, error) {
+	if len(a) == 0 {
+		ip.TypeError("stat() takes at least 1 argument")
+	}
+	p := osPathArg(ip, a[0])
+	var (
+		fi  os.FileInfo
+		err error
+	)
+	if follow {
+		fi, err = os.Stat(p)
+	} else {
+		fi, err = os.Lstat(p)
+	}
+	if err != nil {
+		if os.IsNotExist(err) {
+			ip.raise(ip.excType("FileNotFoundError"), "[WinError 2] %v: %q", err, p)
+		}
+		if os.IsPermission(err) {
+			ip.raise(ip.excType("PermissionError"), "[WinError 5] %v: %q", err, p)
+		}
+		ip.raise(ip.excType("OSError"), "%v: %q", err, p)
+	}
+	return newStatResult(ip, fi), nil
+}
+
+// osPathArg 把 str/bytes/PathLike 统一解成 Go 字符串。
+func osPathArg(ip *Interp, o object.Object) string {
+	switch v := o.(type) {
+	case *object.Bytes:
+		return string(v.V)
+	case *object.Instance:
+		if m2, ok := ip.findDunder(v.Class, "__fspath__"); ok {
+			if r := ip.Call(ip.bindMethod(v, m2), nil, nil); r != nil {
+				return r.Str()
+			}
+		}
+	}
+	return o.Str()
 }
 
 func modOSPath(ip *Interp) *object.Module {
@@ -1072,55 +1259,55 @@ func modOSPath(ip *Interp) *object.Module {
 		return &object.Str{V: filepath.Join(parts...)}, nil
 	})
 	m.Dict["exists"] = bi("exists", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		_, err := os.Stat(args[0].Str())
+		_, err := os.Stat(osPathArg(ip, args[0]))
 		return object.GetBool(err == nil), nil
 	})
 	m.Dict["isfile"] = bi("isfile", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		st, err := os.Stat(args[0].Str())
+		st, err := os.Stat(osPathArg(ip, args[0]))
 		return object.GetBool(err == nil && !st.IsDir()), nil
 	})
 	m.Dict["isdir"] = bi("isdir", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		st, err := os.Stat(args[0].Str())
+		st, err := os.Stat(osPathArg(ip, args[0]))
 		return object.GetBool(err == nil && st.IsDir()), nil
 	})
 	m.Dict["basename"] = bi("basename", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		return &object.Str{V: filepath.Base(args[0].Str())}, nil
+		return &object.Str{V: filepath.Base(osPathArg(ip, args[0]))}, nil
 	})
 	m.Dict["dirname"] = bi("dirname", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		return &object.Str{V: filepath.Dir(args[0].Str())}, nil
+		return &object.Str{V: filepath.Dir(osPathArg(ip, args[0]))}, nil
 	})
 	m.Dict["abspath"] = bi("abspath", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		p, _ := filepath.Abs(args[0].Str())
+		p, _ := filepath.Abs(osPathArg(ip, args[0]))
 		return &object.Str{V: p}, nil
 	})
 	m.Dict["split"] = bi("split", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		d, f := filepath.Split(args[0].Str())
+		d, f := filepath.Split(osPathArg(ip, args[0]))
 		return &object.Tuple{Items: []object.Object{&object.Str{V: d}, &object.Str{V: f}}}, nil
 	})
 	m.Dict["splitext"] = bi("splitext", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		p := args[0].Str()
+		p := osPathArg(ip, args[0])
 		ext := filepath.Ext(p)
 		return &object.Tuple{Items: []object.Object{&object.Str{V: strings.TrimSuffix(p, ext)}, &object.Str{V: ext}}}, nil
 	})
 	m.Dict["isabs"] = bi("isabs", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		return object.GetBool(filepath.IsAbs(args[0].Str())), nil
+		return object.GetBool(filepath.IsAbs(osPathArg(ip, args[0]))), nil
 	})
 	m.Dict["normpath"] = bi("normpath", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		return &object.Str{V: filepath.Clean(args[0].Str())}, nil
+		return &object.Str{V: filepath.Clean(osPathArg(ip, args[0]))}, nil
 	})
 	m.Dict["relpath"] = bi("relpath", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		base := "."
 		if len(args) > 1 {
 			base = args[1].Str()
 		}
-		r, err := filepath.Rel(base, args[0].Str())
+		r, err := filepath.Rel(base, osPathArg(ip, args[0]))
 		if err != nil {
 			ip.raise(ip.excType("ValueError"), "%v", err)
 		}
 		return &object.Str{V: r}, nil
 	})
 	m.Dict["realpath"] = bi("realpath", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		p, err := filepath.Abs(args[0].Str())
+		p, err := filepath.Abs(osPathArg(ip, args[0]))
 		if err != nil {
 			p = args[0].Str()
 		}
@@ -1135,12 +1322,80 @@ func modOSPath(ip *Interp) *object.Module {
 		return &object.Str{V: p}, nil
 	})
 	m.Dict["getsize"] = bi("getsize", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		st, err := os.Stat(args[0].Str())
+		st, err := os.Stat(osPathArg(ip, args[0]))
 		if err != nil {
 			ip.raise(ip.excType("OSError"), "%v", err)
 		}
 		return &object.Int{V: st.Size()}, nil
 	})
+	// 平台常量与语义函数：pathlib.py:391 `os.path.sep` 是模块级 _flavour 的硬依赖
+	if isWindows() {
+		m.Dict["sep"] = &object.Str{V: "\\"}
+		m.Dict["altsep"] = &object.Str{V: "/"}
+		m.Dict["pathsep"] = &object.Str{V: ";"}
+		m.Dict["devnull"] = &object.Str{V: "nul"}
+	} else {
+		m.Dict["sep"] = &object.Str{V: "/"}
+		m.Dict["altsep"] = object.None
+		m.Dict["pathsep"] = &object.Str{V: ":"}
+		m.Dict["devnull"] = &object.Str{V: "/dev/null"}
+	}
+	m.Dict["extsep"] = &object.Str{V: "."}
+	m.Dict["curdir"] = &object.Str{V: "."}
+	m.Dict["pardir"] = &object.Str{V: ".."}
+	m.Dict["defpath"] = &object.Str{V: ".;C:\\bin"}
+	// splitdrive：Windows 下认 “C:” 盘符与 UNC “\\\\server\\share”
+	m.Dict["splitdrive"] = bi("splitdrive", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		p := args[0].Str()
+		if !isWindows() {
+			return &object.Tuple{Items: []object.Object{&object.Str{V: ""}, &object.Str{V: p}}}, nil
+		}
+		if len(p) >= 2 && p[1] == ':' && ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) {
+			return &object.Tuple{Items: []object.Object{&object.Str{V: p[:2]}, &object.Str{V: p[2:]}}}, nil
+		}
+		if len(p) >= 2 && (p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/') {
+			// UNC：前两段 \\server\share
+			var segs []int
+			for i := 2; i < len(p); i++ {
+				if p[i] == '\\' || p[i] == '/' {
+					segs = append(segs, i)
+				}
+			}
+			if len(segs) >= 2 {
+				return &object.Tuple{Items: []object.Object{&object.Str{V: p[:segs[1]]}, &object.Str{V: p[segs[1]:]}}}, nil
+			}
+		}
+		return &object.Tuple{Items: []object.Object{&object.Str{V: ""}, &object.Str{V: p}}}, nil
+	})
+	// normcase：Windows 下小写 + 正斜杠转反斜杠
+	m.Dict["normcase"] = bi("normcase", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		p := args[0].Str()
+		if isWindows() {
+			p = strings.ToLower(strings.ReplaceAll(p, "/", "\\"))
+		}
+		return &object.Str{V: p}, nil
+	})
+	m.Dict["islink"] = bi("islink", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		st, err := os.Lstat(args[0].Str())
+		return object.GetBool(err == nil && st.Mode()&os.ModeSymlink != 0), nil
+	})
+	m.Dict["samefile"] = bi("samefile", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		a, err1 := os.Stat(args[0].Str())
+		b, err2 := os.Stat(args[1].Str())
+		return object.GetBool(err1 == nil && err2 == nil && os.SameFile(a, b)), nil
+	})
+	mkTime := func(name string, get func(os.FileInfo) int64) {
+		m.Dict[name] = bi(name, func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+			st, err := os.Stat(args[0].Str())
+			if err != nil {
+				ip.raise(ip.excType("OSError"), "%v", err)
+			}
+			return &object.Float{V: float64(get(st))}, nil
+		})
+	}
+	mkTime("getmtime", func(st os.FileInfo) int64 { return st.ModTime().Unix() })
+	mkTime("getatime", func(st os.FileInfo) int64 { return st.ModTime().Unix() })
+	mkTime("getctime", func(st os.FileInfo) int64 { return st.ModTime().Unix() })
 	return m
 }
 
@@ -1224,8 +1479,66 @@ func modSys(ip *Interp) *object.Module {
 		}
 		return object.None, nil
 	})
-	m.Dict["stdout"] = &object.Str{V: ""}
+	// sys.stdout / sys.stderr：logging.StreamHandler.emit（logging/__init__.py:1027）
+	// 直接 self.stream.write(...)，旧占位 Str 会导致 AttributeError。
+	m.Dict["stdout"] = newTextStream(ip, ip.Stdout, 1)
+	m.Dict["stderr"] = newTextStream(ip, ip.Stderr, 2)
+	m.Dict["__stdout__"] = m.Dict["stdout"]
+	m.Dict["__stderr__"] = m.Dict["stderr"]
+	m.Dict["stdin"] = newTextStream(ip, io.Discard, 0)
+	// sys.intern：pathlib.py:404 `sys.intern(str(x))` 是 _parse_path 热路径，
+	// Go 字符串不可变，直接原样返回即语义等价。
+	m.Dict["intern"] = bi("intern", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		if len(args) == 0 {
+			ip.TypeError("intern() takes exactly one argument")
+		}
+		if _, ok := args[0].(*object.Str); !ok {
+			ip.TypeError("intern() argument must be str, not %s", object.TypeName(args[0]))
+		}
+		return args[0], nil
+	})
+	m.Dict["getdefaultencoding"] = bi("getdefaultencoding", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		return &object.Str{V: "utf-8"}, nil
+	})
+	m.Dict["getfilesystemencoding"] = bi("getfilesystemencoding", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		return &object.Str{V: "utf-8"}, nil
+	})
+	m.Dict["getsizeof"] = bi("getsizeof", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		return &object.Int{V: 64}, nil
+	})
+	m.Dict["float_repr_style"] = &object.Str{V: "short"}
+	m.Dict["abiflags"] = &object.Str{V: ""}
 	return m
+}
+
+// newTextStream 构造最小 TextIOWrapper 兼容对象（write / flush / isatty / fileno / writable）。
+// 仅供 sys.stdout / sys.stderr 使用：logging / urllib3 只会调 write 与 flush。
+func newTextStream(ip *Interp, w io.Writer, fd int) *object.Instance {
+	cls := &object.TypeObj{Name: "TextIOWrapper", Dict: map[string]object.Object{}}
+	inst := &object.Instance{Class: cls, Dict: map[string]object.Object{}}
+	inst.Dict["write"] = bi("write", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) > 0 {
+			w.Write([]byte(a[0].Str()))
+		}
+		return &object.Int{V: 0}, nil
+	})
+	inst.Dict["flush"] = bi("flush", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return object.None, nil
+	})
+	inst.Dict["close"] = inst.Dict["flush"]
+	inst.Dict["writable"] = bi("writable", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return object.GetBool(true), nil
+	})
+	inst.Dict["readable"] = bi("readable", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return object.GetBool(false), nil
+	})
+	inst.Dict["isatty"] = bi("isatty", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return object.GetBool(false), nil
+	})
+	inst.Dict["fileno"] = bi("fileno", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		return &object.Int{V: int64(fd)}, nil
+	})
+	return inst
 }
 
 // ==================== string ====================
@@ -1241,7 +1554,248 @@ func modString(ip *Interp) *object.Module {
 	m.Dict["punctuation"] = &object.Str{V: "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"}
 	m.Dict["whitespace"] = &object.Str{V: " \t\n\r\v\f"}
 	m.Dict["printable"] = &object.Str{V: "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ \t\n\r\v\f"}
+	m.Dict["Formatter"] = modStringFormatter(ip)
+	m.Dict["Template"] = modStringTemplate(ip)
 	return m
+}
+
+// modStringFormatter 实现 string.Formatter 的 parse/format 面。
+// CPython 3.13+ 的 logging/__init__.py:30 模块级 `from string import Formatter`（别名 StrFormatter），
+// 432 行就 `StrFormatter()` 实例化，parse() 用于拆 %(name)s 模板——缺了就整条 logging 链断。
+func modStringFormatter(ip *Interp) *object.TypeObj {
+	cls := &object.TypeObj{Name: "Formatter", Dict: map[string]object.Object{}}
+	cls.Dict["parse"] = bi("parse", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		s := ""
+		if len(a) > 1 {
+			s = a[1].Str()
+		} else if len(a) > 0 {
+			s = a[0].Str()
+		}
+		return formatterParse(s), nil
+	})
+	cls.Dict["get_value"] = bi("get_value", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		key := ""
+		args := object.Object(object.None)
+		kwargs := object.Object(object.None)
+		if len(a) > 1 {
+			key = a[1].Str()
+		}
+		if len(a) > 2 {
+			args = a[2]
+		}
+		if len(a) > 3 {
+			kwargs = a[3]
+		}
+		if d, ok := kwargs.(*object.Dict); ok {
+			if v, ok2 := d.Get(&object.Str{V: key}); ok2 {
+				return v, nil
+			}
+		}
+		if n, err := strconv.Atoi(key); err == nil {
+			if lst := ip.ToSlice(args); n >= 0 && n < len(lst) {
+				return lst[n], nil
+			}
+		}
+		ip.raise(ip.excType("KeyError"), "%s", key)
+		return object.None, nil
+	})
+	cls.Dict["vformat"] = bi("vformat", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) < 2 {
+			ip.TypeError("vformat() missing format string")
+		}
+		return &object.Str{V: a[1].Str()}, nil
+	})
+	cls.Dict["format"] = bi("format", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) < 2 {
+			ip.TypeError("format() missing format string")
+		}
+		return &object.Str{V: a[1].Str()}, nil
+	})
+	return cls
+}
+
+// formatterParse 按 CPython string.Formatter.parse 口径拆解格式串：
+// 返回 [(literal_text, field_name, format_spec, conversion), ...]。
+func formatterParse(s string) *object.List {
+	var out []object.Object
+	var lit strings.Builder
+	flush := func(field, spec, conv object.Object) {
+		out = append(out, &object.Tuple{Items: []object.Object{&object.Str{V: lit.String()}, field, spec, conv}})
+		lit.Reset()
+	}
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c == '{' {
+			if i+1 < len(s) && s[i+1] == '{' {
+				lit.WriteByte('{')
+				i += 2
+				continue
+			}
+			depth := 1
+			j := i + 1
+			for j < len(s) && depth > 0 {
+				switch s[j] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+				}
+				j++
+			}
+			if depth != 0 {
+				lit.WriteString(s[i:])
+				break
+			}
+			name, spec, conv := splitFormatterField(s[i+1 : j-1])
+			flush(strOrNone(name), strOrNone(spec), strOrNone(conv))
+			i = j
+			continue
+		}
+		if c == '}' && i+1 < len(s) && s[i+1] == '}' {
+			lit.WriteByte('}')
+			i += 2
+			continue
+		}
+		lit.WriteByte(c)
+		i++
+	}
+	out = append(out, &object.Tuple{Items: []object.Object{&object.Str{V: lit.String()}, object.None, object.None, object.None}})
+	return &object.List{Items: out}
+}
+
+// splitFormatterField 把 `name!conv:spec` 拆成三段（spec 里允许嵌套大括号）。
+func splitFormatterField(inner string) (name, spec, conv string) {
+	hasSpec, hasConv := false, false
+	depth := 0
+	nameEnd := len(inner)
+	for i := 0; i < len(inner); i++ {
+		switch inner[i] {
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+		case '!':
+			if depth == 0 && !hasSpec && !hasConv && i+1 < len(inner) && inner[i+1] != '=' {
+				nameEnd = i
+				hasConv = true
+			}
+		case ':':
+			if depth == 0 && !hasSpec {
+				if !hasConv {
+					nameEnd = i
+				}
+				hasSpec = true
+			}
+		}
+	}
+	name = inner[:nameEnd]
+	rest := inner[nameEnd:]
+	if hasConv && strings.HasPrefix(rest, "!") {
+		end := strings.IndexByte(rest, ':')
+		if end < 0 {
+			conv = rest[1:]
+			return
+		}
+		conv = rest[1:end]
+		rest = rest[end:]
+	}
+	if hasSpec && strings.HasPrefix(rest, ":") {
+		spec = rest[1:]
+	}
+	return
+}
+
+// modStringTemplate 实现 string.Template（子类可覆盖 delimiter/idpattern/braceidpattern）。
+func modStringTemplate(ip *Interp) *object.TypeObj {
+	cls := &object.TypeObj{Name: "Template", Dict: map[string]object.Object{}}
+	cls.Dict["delimiter"] = &object.Str{V: "$"}
+	cls.Dict["idpattern"] = &object.Str{V: "(?a:[_a-z][_a-z0-9]*)"}
+	cls.Dict["braceidpattern"] = object.None
+	cls.Dict["pattern"] = object.None
+	cls.Dict["flags"] = &object.Int{V: 0}
+	cls.Dict["__init__"] = bi("__init__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) > 1 {
+			if inst, ok := a[0].(*object.Instance); ok {
+				inst.Dict["template"] = a[1]
+			}
+		}
+		return object.None, nil
+	})
+	cls.Dict["substitute"] = bi("substitute", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) < 2 {
+			ip.TypeError("substitute() missing mapping")
+		}
+		inst, _ := a[0].(*object.Instance)
+		tmpl := ""
+		if inst != nil {
+			tmpl = inst.Dict["template"].Str()
+		}
+		return &object.Str{V: renderTemplate(ip, tmpl, a[1])}, nil
+	})
+	cls.Dict["safe_substitute"] = cls.Dict["substitute"]
+	return cls
+}
+
+// renderTemplate 做 $name / ${name} / $$ 替换，未命中键保留原样（safe 语义）。
+func renderTemplate(ip *Interp, tmpl string, mapping object.Object) string {
+	get := func(name string) (string, bool) {
+		switch m := mapping.(type) {
+		case *object.Dict:
+			if v, ok := m.Get(&object.Str{V: name}); ok {
+				return v.Str(), true
+			}
+		case *object.Instance:
+			if v, ok := m.Dict[name]; ok {
+				return v.Str(), true
+			}
+		}
+		return "", false
+	}
+	var sb strings.Builder
+	for i := 0; i < len(tmpl); i++ {
+		if tmpl[i] != '$' {
+			sb.WriteByte(tmpl[i])
+			continue
+		}
+		if i+1 < len(tmpl) && tmpl[i+1] == '$' {
+			sb.WriteByte('$')
+			i++
+			continue
+		}
+		j := i + 1
+		brace := false
+		if j < len(tmpl) && tmpl[j] == '{' {
+			brace = true
+			j++
+		}
+		start := j
+		for j < len(tmpl) {
+			c := tmpl[j]
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+				j++
+				continue
+			}
+			break
+		}
+		name := tmpl[start:j]
+		if brace {
+			if j < len(tmpl) && tmpl[j] == '}' {
+				j++
+			} else {
+				sb.WriteString(tmpl[i:j])
+				i = j - 1
+				continue
+			}
+		}
+		if v, ok := get(name); ok {
+			sb.WriteString(v)
+		} else {
+			sb.WriteString(tmpl[i:j])
+		}
+		i = j - 1
+	}
+	return sb.String()
 }
 
 // ==================== collections ====================
@@ -1514,6 +2068,133 @@ func modItertools(ip *Interp) *object.Module {
 		}
 		return &object.List{Items: out}, nil
 	})
+	// takewhile / dropwhile / filterfalse / compress / starmap / accumulate / zip_longest / tee
+	// urllib3/util/retry.py:9 模块级 `from itertools import takewhile`。
+	m.Dict["takewhile"] = bi("takewhile", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		var out []object.Object
+		for _, x := range ip.ToSlice(a[1]) {
+			r := ip.Call(a[0], []object.Object{x}, nil)
+			if !object.Truthy(r) {
+				break
+			}
+			out = append(out, x)
+		}
+		return &object.List{Items: out}, nil
+	})
+	m.Dict["dropwhile"] = bi("dropwhile", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		var out []object.Object
+		dropping := true
+		for _, x := range ip.ToSlice(a[1]) {
+			if dropping {
+				r := ip.Call(a[0], []object.Object{x}, nil)
+				if object.Truthy(r) {
+					continue
+				}
+				dropping = false
+			}
+			out = append(out, x)
+		}
+		return &object.List{Items: out}, nil
+	})
+	m.Dict["filterfalse"] = bi("filterfalse", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		var out []object.Object
+		for _, x := range ip.ToSlice(a[1]) {
+			r := ip.Call(a[0], []object.Object{x}, nil)
+			if !object.Truthy(r) {
+				out = append(out, x)
+			}
+		}
+		return &object.List{Items: out}, nil
+	})
+	m.Dict["compress"] = bi("compress", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		data := ip.ToSlice(a[0])
+		sel := ip.ToSlice(a[1])
+		var out []object.Object
+		for i, x := range data {
+			if i < len(sel) && object.Truthy(sel[i]) {
+				out = append(out, x)
+			}
+		}
+		return &object.List{Items: out}, nil
+	})
+	m.Dict["starmap"] = bi("starmap", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		var out []object.Object
+		for _, x := range ip.ToSlice(a[1]) {
+			out = append(out, ip.Call(a[0], ip.ToSlice(x), nil))
+		}
+		return &object.List{Items: out}, nil
+	})
+	m.Dict["accumulate"] = bi("accumulate", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		items := ip.ToSlice(a[0])
+		var out []object.Object
+		var acc object.Object
+		for i, x := range items {
+			if i == 0 {
+				acc = x
+			} else if len(a) > 1 && a[1] != object.None {
+				acc = ip.Call(a[1], []object.Object{acc, x}, nil)
+			} else {
+				acc = ip.BinOp("+", acc, x)
+			}
+			out = append(out, acc)
+		}
+		return &object.List{Items: out}, nil
+	})
+	m.Dict["zip_longest"] = bi("zip_longest", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		fill := object.Object(object.None)
+		var seqs []object.Object
+		for _, x := range a {
+			seqs = append(seqs, x)
+		}
+		if k != nil {
+			if v, ok := k["fillvalue"]; ok {
+				fill = v
+			}
+		}
+		maxLen := 0
+		slices := make([][]object.Object, len(seqs))
+		for i, sq := range seqs {
+			slices[i] = ip.ToSlice(sq)
+			if len(slices[i]) > maxLen {
+				maxLen = len(slices[i])
+			}
+		}
+		var out []object.Object
+		for i := 0; i < maxLen; i++ {
+			row := make([]object.Object, len(slices))
+			for j := range slices {
+				if i < len(slices[j]) {
+					row[j] = slices[j][i]
+				} else {
+					row[j] = fill
+				}
+			}
+			out = append(out, &object.Tuple{Items: row})
+		}
+		return &object.List{Items: out}, nil
+	})
+	m.Dict["pairwise"] = bi("pairwise", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		items := ip.ToSlice(a[0])
+		var out []object.Object
+		for i := 1; i < len(items); i++ {
+			out = append(out, &object.Tuple{Items: []object.Object{items[i-1], items[i]}})
+		}
+		return &object.List{Items: out}, nil
+	})
+	m.Dict["tee"] = bi("tee", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		items := ip.ToSlice(a[0])
+		n := int64(2)
+		if len(a) > 1 {
+			if v, ok := object.AsInt(a[1]); ok {
+				n = v
+			}
+		}
+		var out []object.Object
+		for i := int64(0); i < n; i++ {
+			out = append(out, &object.List{Items: append([]object.Object{}, items...)})
+		}
+		return &object.Tuple{Items: out}, nil
+	})
 	m.Dict["product"] = bi("product", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		lists := make([][]object.Object, len(args))
 		for i, a := range args {
@@ -1738,32 +2419,111 @@ func modFunctools(ip *Interp) *object.Module {
 		if len(args) > 0 && (isCallableObj(args[0])) {
 			target = args[0]
 		}
-		wrap := func(fn object.Object) object.Object {
-			cache := map[string]object.Object{}
-			return bi("cached", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-				key := ""
-				for _, x := range a {
-					key += ip.Repr(x) + "|"
-				}
-				if v, ok := cache[key]; ok {
-					return v, nil
-				}
-				v := ip.Call(fn, a, k)
-				cache[key] = v
-				return v, nil
-			})
-		}
 		if target != nil {
-			return wrap(target), nil
+			return makeCachedCallable(ip, target), nil
 		}
 		return bi("lru_cache_decorator", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-			return wrap(a[0]), nil
+			return makeCachedCallable(ip, a[0]), nil
 		}), nil
+	})
+	// functools.cache：CPython 3.9+ 等价于 lru_cache(maxsize=None)，
+	// pathlib.py:58 模块级就靠它包 _PosixFlavour._parse_parts
+	m.Dict["cache"] = bi("cache", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) == 0 {
+			ip.TypeError("cache() requires a callable")
+		}
+		return makeCachedCallable(ip, a[0]), nil
 	})
 	m.Dict["cmp_to_key"] = bi("cmp_to_key", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		return args[0], nil
 	})
+	// total_ordering：从单个根运算（__lt__/__le__/__gt__/__ge__）推导其余三个（CPython _convert 口径）。
+	// urllib3 的 HTTPHeaderDict 等大量类用 @total_ordering。
+	m.Dict["total_ordering"] = bi("total_ordering", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		return ip.applyTotalOrdering(args[0])
+	})
 	return m
+}
+
+// totalOrderingDerive 描述「从根运算推导派生运算」的规则：
+// 0 = 取反；1 = 取反且 self != other；2 = 原值或 self == other（对齐 CPython functools._convert）。
+type totalOrderingRule struct {
+	op   string
+	kind int
+}
+
+var totalOrderingTable = map[string][]totalOrderingRule{
+	"__lt__": {{"__gt__", 1}, {"__le__", 2}, {"__ge__", 0}},
+	"__le__": {{"__gt__", 0}, {"__lt__", 1}, {"__ge__", 2}},
+	"__gt__": {{"__lt__", 1}, {"__ge__", 2}, {"__le__", 0}},
+	"__ge__": {{"__lt__", 1}, {"__gt__", 0}, {"__le__", 2}},
+}
+
+// applyTotalOrdering 实现 functools.total_ordering(cls)。
+func (ip *Interp) applyTotalOrdering(o object.Object) (object.Object, error) {
+	cls, ok := o.(*object.TypeObj)
+	if !ok {
+		ip.TypeError("total_ordering() argument must be a class")
+	}
+	has := func(n string) bool {
+		_, ok := cls.Lookup(n)
+		return ok
+	}
+	root := ""
+	for _, n := range []string{"__lt__", "__le__", "__gt__", "__ge__"} {
+		if has(n) {
+			root = n
+			break
+		}
+	}
+	if root == "" {
+		ip.raise(ip.excType("ValueError"), "must define at least one ordering operation: < > <= >=")
+	}
+	for _, r := range totalOrderingTable[root] {
+		if has(r.op) {
+			continue
+		}
+		op := r.op
+		kind := r.kind
+		cls.Dict[op] = bi(op, func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			if len(a) < 2 {
+				ip.TypeError("%s() takes two arguments", op)
+			}
+			self, other := a[0], a[1]
+			fn, ok := cls.Lookup(root)
+			if !ok {
+				return object.None, nil
+			}
+			res := ip.Call(ip.bindMethod(self, fn), []object.Object{other}, nil)
+			truth := object.Truthy(res)
+			switch kind {
+			case 0:
+				return object.GetBool(!truth), nil
+			case 1:
+				return object.GetBool(!truth && !object.Equal(self, other)), nil
+			default:
+				return object.GetBool(truth || object.Equal(self, other)), nil
+			}
+		})
+	}
+	return cls, nil
+}
+
+// makeCachedCallable 按参数 repr 做无界缓存的调用包装（lru_cache / cache 共用）。
+func makeCachedCallable(ip *Interp, fn object.Object) object.Object {
+	cache := map[string]object.Object{}
+	return bi("cached", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		key := ""
+		for _, x := range a {
+			key += ip.Repr(x) + "|"
+		}
+		if v, ok := cache[key]; ok {
+			return v, nil
+		}
+		v := ip.Call(fn, a, k)
+		cache[key] = v
+		return v, nil
+	})
 }
 
 func isCallableObj(o object.Object) bool {
@@ -1901,6 +2661,42 @@ func modBase64(ip *Interp) *object.Module {
 			data = []byte(v.V)
 		}
 		return &object.Bytes{V: []byte(base64.StdEncoding.EncodeToString(data))}, nil
+	})
+	// encodebytes / decodebytes：email.encoders:15 `from base64 import encodebytes` 硬依赖。
+	// CPython 口径：每 76 字符断行（MIME base64）。
+	m.Dict["encodebytes"] = bi("encodebytes", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		if len(args) == 0 {
+			return &object.Bytes{}, nil
+		}
+		enc := base64.StdEncoding.EncodeToString(pyRawBytes(args[0]))
+		var sb strings.Builder
+		for i := 0; i < len(enc); i += 76 {
+			end := i + 76
+			if end > len(enc) {
+				end = len(enc)
+			}
+			sb.WriteString(enc[i:end])
+			sb.WriteString("\n")
+		}
+		return &object.Bytes{V: []byte(sb.String())}, nil
+	})
+	m.Dict["decodebytes"] = bi("decodebytes", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		if len(args) == 0 {
+			return &object.Bytes{}, nil
+		}
+		raw := string(pyRawBytes(args[0]))
+		// 去掉所有空白（CPython 的 binascii.a2b_base64 宽容空白）
+		clean := strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
+				return -1
+			}
+			return r
+		}, raw)
+		data, err := base64.StdEncoding.DecodeString(clean)
+		if err != nil {
+			ip.raise(ip.excType("binascii.Error"), "%v", err)
+		}
+		return &object.Bytes{V: data}, nil
 	})
 	m.Dict["b64decode"] = bi("b64decode", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		var s string
@@ -2275,7 +3071,8 @@ func modTyping(ip *Interp) *object.Module {
 	})
 	for _, n := range []string{"List", "Dict", "Tuple", "Set", "Optional", "Any", "Union", "Callable", "Iterable", "Iterator", "Sequence", "Mapping", "Type",
 		"Generic", "TypedDict", "Protocol", "Literal", "Final", "ClassVar", "NoReturn", "TypeAlias", "Self",
-		"AnyStr", "Text", "IO", "BinaryIO", "FrozenSet", "AbstractSet", "MutableMapping", "MutableSequence",
+		"AnyStr", "Text", "IO", "BinaryIO", "TextIO", "ByteString", "Container", "Collection", "Reversible",
+		"FrozenSet", "AbstractSet", "MutableMapping", "MutableSequence",
 		"MutableSet", "DefaultDict", "Deque", "Counter", "OrderedDict", "ChainMap", "KeysView", "ValuesView",
 		"ItemsView", "AsyncIterable", "AsyncIterator", "Awaitable", "Coroutine", "AsyncGenerator",
 		"AsyncContextManager", "ContextManager", "Generator", "Hashable", "Reversible", "Sized",

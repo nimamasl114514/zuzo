@@ -16,6 +16,21 @@ func init() {
 
 func modOperator(ip *Interp) *object.Module {
 	m := newModule("_operator")
+	// _compare_digest：hmac.py:12 `from _operator import _compare_digest`，CPython 口径的常量时间比较。
+	m.Dict["_compare_digest"] = bi("_compare_digest", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		if len(a) < 2 {
+			return object.FalseObj, nil
+		}
+		x, y := pyRawBytes(a[0]), pyRawBytes(a[1])
+		if len(x) != len(y) {
+			return object.FalseObj, nil
+		}
+		var v byte
+		for i := range x {
+			v |= x[i] ^ y[i]
+		}
+		return object.GetBool(v == 0), nil
+	})
 
 	bin := func(name, op string) {
 		m.Dict[name] = bi(name, func(a []object.Object, k map[string]object.Object) (object.Object, error) {

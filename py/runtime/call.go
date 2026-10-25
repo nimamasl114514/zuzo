@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"strconv"
+
 	"zuzo/py/ast"
 	"zuzo/py/object"
 )
@@ -153,7 +155,11 @@ func (ip *Interp) callFunction(f *object.Function, args []object.Object, kwargs 
 		ip.Depth--
 		ip.raise(ip.excType("RecursionError"), "maximum recursion depth exceeded")
 	}
-	ip.Frames = append(ip.Frames, "  File \""+ip.MainFile+"\", in "+f.Name)
+	fname := f.File
+	if fname == "" {
+		fname = ip.MainFile
+	}
+	ip.Frames = append(ip.Frames, "  File \""+fname+"\", line "+strconv.Itoa(ip.CurLine)+", in "+f.Name)
 	defer func() {
 		ip.Depth--
 		if len(ip.Frames) > 0 {

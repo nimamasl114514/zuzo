@@ -105,6 +105,40 @@ func compileReFor(ip *Interp, pattern string, flags int64) *regexp.Regexp {
 }
 
 // finditerList 返回可迭代的 Match 列表（元素支持 start/end/group/groups/span/groupdict）
+// reFindallItems 按 CPython 口径把 FindAllStringSubmatch 的结果转成对象列表：
+// 组数 0 → 整体匹配 str；组数 1 → 该组 str（未匹配为 ”）；组数 ≥2 → tuple（未匹配组为 ”）。
+// 依据 CPython sre_parse：len(result) == max(1, pattern.groups)。
+// 反例（修复前）：单捕获组返回 1 元 tuple，害得 textwrap.dedent 的
+// indent.startswith(margin) 抛 'tuple' object has no attribute 'startswith'（importlib.metadata:89）。
+func reFindallItems(re *regexp.Regexp, s string, limit int) []object.Object {
+	nsub := re.NumSubexp()
+	all := re.FindAllStringSubmatch(s, limit)
+	out := make([]object.Object, 0, len(all))
+	for _, g := range all {
+		switch {
+		case nsub == 0:
+			out = append(out, &object.Str{V: g[0]})
+		case nsub == 1:
+			v := ""
+			if len(g) > 1 {
+				v = g[1]
+			}
+			out = append(out, &object.Str{V: v})
+		default:
+			items := make([]object.Object, 0, nsub)
+			for i := 1; i <= nsub; i++ {
+				v := ""
+				if i < len(g) {
+					v = g[i]
+				}
+				items = append(items, &object.Str{V: v})
+			}
+			out = append(out, &object.Tuple{Items: items})
+		}
+	}
+	return out
+}
+
 func finditerList(ip *Interp, re *regexp.Regexp, s string) object.Object {
 	locs := re.FindAllStringSubmatchIndex(s, -1)
 	items := make([]object.Object, 0, len(locs))

@@ -106,6 +106,7 @@ func (ip *Interp) evalExpr(e ast.Expr, env *object.Env) object.Object {
 	case *ast.Lambda:
 		fn := &object.Function{
 			Name:    "<lambda>",
+			File:    ip.MainFile,
 			Params:  n.Params,
 			Globals: ip.Globals,
 			Closure: env,
@@ -445,6 +446,7 @@ func (ip *Interp) makeFunction(node *ast.FuncDef, env *object.Env) object.Object
 	fn := &object.Function{
 		Name:     node.Name,
 		QualName: node.Name,
+		File:     ip.MainFile,
 		Params:   node.Params,
 		Body:     node.Body,
 		Globals:  ip.Globals,

@@ -180,6 +180,27 @@ func (ip *Interp) initExceptions() {
 			return object.None, nil
 		}}
 	}
+	// object.__ne__ / __lt__ / __le__ / __gt__ / __ge__：CPython 里都属于 object 描述符，
+	// 库代码会直接引用（http/cookies.py:324 `__ne__ = object.__ne__` 实锤）。
+	if _, ok := ObjectType.Dict["__ne__"]; !ok {
+		ObjectType.Dict["__ne__"] = &object.Builtin{Name: "__ne__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+			if len(args) > 1 {
+				return &object.Bool{V: !object.Equal(args[0], args[1])}, nil
+			}
+			return object.None, nil
+		}}
+	}
+	// 默认序号比较：CPython 的 object 不提供 __lt__ 等（返回 NotImplemented）；
+	// 但描述符本身存在，库会反射式取它，所以给同名槽位而不改变比较语义。
+	for _, cmpName := range []string{"__lt__", "__le__", "__gt__", "__ge__"} {
+		if _, ok := ObjectType.Dict[cmpName]; ok {
+			continue
+		}
+		nm := cmpName
+		ObjectType.Dict[nm] = &object.Builtin{Name: nm, Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+			return object.None, nil
+		}}
+	}
 	if _, ok := ObjectType.Dict["__new__"]; !ok {
 		ObjectType.Dict["__new__"] = &object.Builtin{Name: "__new__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
 			if len(args) > 0 {
@@ -386,6 +407,16 @@ func registerBuiltins(ip *Interp) {
 				ip.ValueError("could not convert string to float: %s", v.Repr())
 			}
 			return &object.Float{V: f}, nil
+		case *object.Instance:
+			// 用户类 / 标准库类的 __float__ 协议
+			if m, ok := ip.findDunder(v.Class, "__float__"); ok {
+				if r := ip.Call(ip.bindMethod(v, m), nil, nil); r != nil {
+					if f, ok2 := object.AsFloat(r); ok2 {
+						return &object.Float{V: f}, nil
+					}
+					return r, nil
+				}
+			}
 		}
 		ip.TypeError("float() argument must be a string or a number, not '%s'", object.TypeName(args[0]))
 		return object.None, nil
@@ -1187,6 +1218,31 @@ func registerBuiltins(ip *Interp) {
 		ip.Builtins.Set(name, t)
 	}
 
+	// __import__：requests/packages.py:9 `__import__(package)` 模块级调用，
+	// 缺它会 NameError。语义按 CPython：fromlist 非空时返回最末级子模块。
+	ip.reg("__import__", func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+		if len(args) == 0 {
+			ip.TypeError("__import__() missing required argument 'name'")
+		}
+		name := args[0].Str()
+		var mod *object.Module
+		ip.protect(func() { mod = ip.importModule(name) })
+		if mod == nil {
+			ip.raiseModuleNotFound(name, "No module named '%s'", name)
+		}
+		if len(args) > 3 && args[3] != object.None {
+			if fl := ip.ToSlice(args[3]); len(fl) > 0 {
+				last := name
+				if i := strings.LastIndex(name, "."); i > 0 {
+					last = name[i+1:]
+				}
+				if sub, ok := mod.Dict[last].(*object.Module); ok {
+					return sub, nil
+				}
+			}
+		}
+		return mod, nil
+	})
 	ip.reg("exec", func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
 		src := args[0].Str()
 		m, errs := parseModuleString(src)
@@ -1291,6 +1347,18 @@ func (ip *Interp) toInt(o object.Object, args []object.Object) (object.Object, e
 		// IntEnum / StrEnum 成员：先解包成原生值再转
 		if nv, ok := ip.nativeValue(v); ok {
 			return ip.toInt(nv, args)
+		}
+		// 用户类 / 标准库类的 __int__ 与 __index__ 协议
+		// （ipaddress.IPv4Address、fractions.Fraction、enum、decimal 等）
+		if m, ok := ip.findDunder(v.Class, "__int__"); ok {
+			if r := ip.Call(ip.bindMethod(v, m), nil, nil); r != nil {
+				return ip.toInt(r, args)
+			}
+		}
+		if m, ok := ip.findDunder(v.Class, "__index__"); ok {
+			if r := ip.Call(ip.bindMethod(v, m), nil, nil); r != nil {
+				return r, nil
+			}
 		}
 		ip.TypeError("int() argument must be a string, a bytes-like object or a number, not '%s'", object.TypeName(o))
 		return object.None, nil
@@ -1453,6 +1521,9 @@ func (ip *Interp) isInstance(o object.Object, clsObj object.Object) bool {
 		if c.Name == "object" {
 			return true
 		}
+		if ip.matchVirtualSubs(o.Type(), c) {
+			return true
+		}
 		return o.Type().IsSubclass(c)
 	case *object.Tuple:
 		for _, it := range c.Items {
@@ -1466,10 +1537,28 @@ func (ip *Interp) isInstance(o object.Object, clsObj object.Object) bool {
 	return false
 }
 
+// matchVirtualSubs 检查 cls 是否注册在 parent 的虚拟子类表（ABC 风格 register 语义）。
+// 目前由 os.PathLike.register 使用；后续 ABCMeta 通用机制接入后本表可作快路径。
+func (ip *Interp) matchVirtualSubs(cls, parent *object.TypeObj) bool {
+	lst, ok := parent.Dict["_virtual_subs"].(*object.List)
+	if !ok {
+		return false
+	}
+	for _, it := range lst.Items {
+		if t, ok2 := it.(*object.TypeObj); ok2 && cls.IsSubclass(t) {
+			return true
+		}
+	}
+	return false
+}
+
 func (ip *Interp) isSubclass(c *object.TypeObj, clsObj object.Object) bool {
 	switch t := clsObj.(type) {
 	case *object.TypeObj:
 		if t.Name == "object" {
+			return true
+		}
+		if ip.matchVirtualSubs(c, t) {
 			return true
 		}
 		return c.IsSubclass(t)

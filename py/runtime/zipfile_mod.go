@@ -388,12 +388,29 @@ func init() {
 	builtinModuleInits["_stat"] = func(ip *Interp) *object.Module {
 		m := newModule("_stat")
 		for _, kv := range [][2]interface{}{
-			{"S_IFMT", 0o170000}, {"S_IFDIR", 0o040000}, {"S_IFREG", 0o100000},
+			{"S_IFDIR", 0o040000}, {"S_IFREG", 0o100000},
 			{"S_IFLNK", 0o120000}, {"S_ISUID", 0o4000}, {"S_ISGID", 0o2000},
 			{"S_ISVTX", 0o1000}, {"S_IRUSR", 0o400}, {"S_IWUSR", 0o200}, {"S_IXUSR", 0o100},
 		} {
 			m.Dict[kv[0].(string)] = &object.Int{V: int64(kv[1].(int))}
 		}
+		// CPython 的 _stat.S_IFMT / S_IMODE 是 C 函数而不是常量：
+		// stat.py 的 S_ISDIR 就写成 `S_IFMT(mode) == S_IFDIR`，
+		// 把 S_IFMT 定义成 int 会让 stat.S_ISDIR(...) 抛 'int' object is not callable。
+		m.Dict["S_IFMT"] = bi("S_IFMT", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			var n int64
+			if len(a) > 0 {
+				n, _ = object.AsInt(a[0])
+			}
+			return &object.Int{V: n & 0o170000}, nil
+		})
+		m.Dict["S_IMODE"] = bi("S_IMODE", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			var n int64
+			if len(a) > 0 {
+				n, _ = object.AsInt(a[0])
+			}
+			return &object.Int{V: n & 0o7777}, nil
+		})
 		return m
 	}
 	builtinModuleInits["_locale"] = func(ip *Interp) *object.Module {
