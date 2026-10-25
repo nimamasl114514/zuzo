@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"zuzo/py/object"
@@ -2053,7 +2054,33 @@ func modCollections(ip *Interp) *object.Module {
 		m.Dict[name] = cls
 		return cls, nil
 	})
-	m.Dict["OrderedDict"] = &object.TypeObj{Name: "OrderedDict", Bases: []*object.TypeObj{object.DictType}, Dict: map[string]object.Object{}}
+	// OrderedDict：requests/sessions.py:228 `self.adapters = OrderedDict()` 之后
+	// 紧接着 `for k in self.adapters` 迭代键。旧占位类（仅 Base=DictType 的 TypeObj）
+	// 造出的是裸 Instance，没有 __iter__，报 'OrderedDict' object is not iterable。
+	// 这里直接返回真 Dict（Go map 不保序，而 object.Dict 用 Keys/Values 双切片天然保序），
+	// 索引 / 迭代 / len / keys / items 全部走 Dict 既有语义。
+	m.Dict["OrderedDict"] = &object.Builtin{Name: "OrderedDict", Fn: func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		d := &object.Dict{}
+		if len(a) > 0 {
+			switch src := a[0].(type) {
+			case *object.Dict:
+				for i, kk := range src.Keys {
+					if i < len(src.Vals) {
+						d.Set(kk, src.Vals[i])
+					}
+				}
+			default:
+				// 其它可迭代：键值对序列
+				for _, it := range ip.ToSlice(a[0]) {
+					pair := ip.ToSlice(it)
+					if len(pair) >= 2 {
+						d.Set(pair[0], pair[1])
+					}
+				}
+			}
+		}
+		return d, nil
+	}}
 	return m
 }
 
@@ -2900,6 +2927,73 @@ func modDatetime(ip *Interp) *object.Module {
 
 // ==================== asyncio ====================
 
+// asyncPrimKey 是并发原语状态在 Instance.Dict 里的私有键
+const asyncPrimKey = "__asyncio_prim__"
+
+// asyncPrim 是 asyncio 并发原语（Queue / Lock / Event）的本地状态载体。
+// 只存 Go 侧状态；Python 侧方法注册在对应 TypeObj.Dict 里，由 bindClassAttr 绑定 self。
+// 阻塞语义：任务各自跑在自己的 goroutine 上，所以“挂起等待”= 当前 goroutine 阻塞在 channel 上，
+// 其余任务照常推进（与既有 sleep/gather 的调度模型一致）。
+type asyncPrim struct {
+	cls  *object.TypeObj
+	kind string
+
+	mu sync.Mutex
+
+	// Queue
+	items []object.Object
+	unfin int // 未 task_done 的条目数（join 用它判断）
+	maxsz int
+	getW  []chan struct{} // 等 get 的挂起点
+	putW  []chan struct{} // 等 put 空位的挂起点
+	joinW []chan struct{} // 等 join 的挂起点
+
+	// Lock
+	locked bool
+	lockW  []chan struct{}
+
+	// Event
+	flag bool
+	evW  []chan struct{}
+}
+
+func (p *asyncPrim) Type() *object.TypeObj { return p.cls }
+func (p *asyncPrim) Repr() string          { return "<asyncio." + p.kind + " object>" }
+func (p *asyncPrim) Str() string           { return p.Repr() }
+
+func asyncPrimOf(a []object.Object) *asyncPrim {
+	if len(a) == 0 {
+		return nil
+	}
+	inst, ok := a[0].(*object.Instance)
+	if !ok {
+		return nil
+	}
+	if v, ok := inst.Dict[asyncPrimKey]; ok {
+		if p, ok := v.(*asyncPrim); ok {
+			return p
+		}
+	}
+	return nil
+}
+
+// wakeAll 关闭并清空全部挂起 channel（调用方必须持锁）
+func wakeAll(list *[]chan struct{}) {
+	for _, c := range *list {
+		close(c)
+	}
+	*list = nil
+}
+
+// wakeOne 唤醒单个挂起点（调用方必须持锁）
+func wakeOne(list *[]chan struct{}) {
+	if len(*list) == 0 {
+		return
+	}
+	close((*list)[0])
+	*list = (*list)[1:]
+}
+
 func modAsyncio(ip *Interp) *object.Module {
 	m := newModule("asyncio")
 	m.Dict["run"] = bi("run", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
@@ -2958,6 +3052,326 @@ func modAsyncio(ip *Interp) *object.Module {
 		}
 		return object.FalseObj, nil
 	})
+	// iscoroutinefunction：async def 编译成 Generator 工厂，靠标记位识别
+	m.Dict["iscoroutinefunction"] = bi("iscoroutinefunction", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		if len(args) == 0 {
+			return object.FalseObj, nil
+		}
+		if fn, ok := args[0].(*object.Function); ok {
+			return object.GetBool(fn.IsAsync), nil
+		}
+		return object.FalseObj, nil
+	})
+	// 事件循环对象：run() 期间存在；脚本里只用 is not None 与 id 类语义
+	loopObj := &object.Instance{Class: &object.TypeObj{Name: "EventLoop", Dict: map[string]object.Object{}}}
+	m.Dict["get_running_loop"] = bi("get_running_loop", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		if len(ip.genStack) == 0 {
+			ip.raise(ip.excType("RuntimeError"), "no running event loop")
+		}
+		return loopObj, nil
+	})
+	m.Dict["get_event_loop"] = bi("get_event_loop", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		return loopObj, nil
+	})
+	m.Dict["new_event_loop"] = bi("new_event_loop", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		return &object.Instance{Class: &object.TypeObj{Name: "EventLoop", Dict: map[string]object.Object{}}}, nil
+	})
+
+	// ---------- 并发原语：Queue / Lock / Event ----------
+	m.Dict["TimeoutError"] = ip.excType("TimeoutError")
+	queueEmpty := &object.TypeObj{Name: "QueueEmpty", Bases: []*object.TypeObj{ip.excType("Exception")}, IsExc: true, Dict: map[string]object.Object{}}
+	queueFull := &object.TypeObj{Name: "QueueFull", Bases: []*object.TypeObj{ip.excType("Exception")}, IsExc: true, Dict: map[string]object.Object{}}
+	m.Dict["QueueEmpty"] = queueEmpty
+	m.Dict["QueueFull"] = queueFull
+
+	mustPrim := func(a []object.Object) *asyncPrim {
+		p := asyncPrimOf(a)
+		if p == nil {
+			ip.RuntimeErr("asyncio primitive used before __init__")
+		}
+		return p
+	}
+	primInit := func(kind string) *object.Builtin {
+		return bi("__init__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			if len(a) == 0 {
+				return object.None, nil
+			}
+			inst, ok := a[0].(*object.Instance)
+			if !ok {
+				return object.None, nil
+			}
+			p := &asyncPrim{cls: inst.Class, kind: kind}
+			if kind == "Queue" {
+				if len(a) > 1 {
+					if n, ok := object.AsInt(a[1]); ok {
+						p.maxsz = int(n)
+					}
+				}
+				if v, ok := k["maxsize"]; ok {
+					if n, ok := object.AsInt(v); ok {
+						p.maxsz = int(n)
+					}
+				}
+				inst.Dict["maxsize"] = &object.Int{V: int64(p.maxsz)}
+			}
+			inst.Dict[asyncPrimKey] = p
+			return object.None, nil
+		})
+	}
+
+	// ---- Queue ----
+	qCls := &object.TypeObj{Name: "Queue", Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}}
+	qCls.Dict["__init__"] = primInit("Queue")
+	qCls.Dict["maxsize"] = &object.Int{V: 0}
+	qCls.Dict["put_nowait"] = bi("put_nowait", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		var item object.Object = object.None
+		if len(a) > 1 {
+			item = a[1]
+		}
+		p.mu.Lock()
+		if p.maxsz > 0 && len(p.items) >= p.maxsz {
+			p.mu.Unlock()
+			ip.raise(queueFull, "")
+			return object.None, nil
+		}
+		p.items = append(p.items, item)
+		p.unfin++
+		wakeAll(&p.getW)
+		p.mu.Unlock()
+		return object.None, nil
+	})
+	qCls.Dict["put"] = bi("put", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		var item object.Object = object.None
+		if len(a) > 1 {
+			item = a[1]
+		}
+		return ip.newGenerator("Queue.put", func(yield func(object.Object) object.Object) {
+			for {
+				p.mu.Lock()
+				if p.maxsz <= 0 || len(p.items) < p.maxsz {
+					p.items = append(p.items, item)
+					p.unfin++
+					wakeAll(&p.getW)
+					p.mu.Unlock()
+					break
+				}
+				c := make(chan struct{})
+				p.putW = append(p.putW, c)
+				p.mu.Unlock()
+				<-c
+			}
+			yield(object.None)
+		}), nil
+	})
+	qCls.Dict["get_nowait"] = bi("get_nowait", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		p.mu.Lock()
+		if len(p.items) == 0 {
+			p.mu.Unlock()
+			ip.raise(queueEmpty, "")
+			return object.None, nil
+		}
+		v := p.items[0]
+		p.items = p.items[1:]
+		wakeAll(&p.putW)
+		p.mu.Unlock()
+		return v, nil
+	})
+	qCls.Dict["get"] = bi("get", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		return ip.newGenerator("Queue.get", func(yield func(object.Object) object.Object) {
+			var v object.Object = object.None
+			for {
+				p.mu.Lock()
+				if len(p.items) > 0 {
+					v = p.items[0]
+					p.items = p.items[1:]
+					wakeAll(&p.putW)
+					p.mu.Unlock()
+					break
+				}
+				c := make(chan struct{})
+				p.getW = append(p.getW, c)
+				p.mu.Unlock()
+				<-c
+			}
+			yield(v)
+		}), nil
+	})
+	qCls.Dict["task_done"] = bi("task_done", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		p.mu.Lock()
+		p.unfin--
+		if p.unfin < 0 {
+			p.mu.Unlock()
+			ip.ValueError("task_done() called too many times")
+			return object.None, nil
+		}
+		if p.unfin == 0 {
+			wakeAll(&p.joinW)
+		}
+		p.mu.Unlock()
+		return object.None, nil
+	})
+	qCls.Dict["join"] = bi("join", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		return ip.newGenerator("Queue.join", func(yield func(object.Object) object.Object) {
+			for {
+				p.mu.Lock()
+				if p.unfin <= 0 {
+					p.mu.Unlock()
+					break
+				}
+				c := make(chan struct{})
+				p.joinW = append(p.joinW, c)
+				p.mu.Unlock()
+				<-c
+			}
+			yield(object.None)
+		}), nil
+	})
+	qCls.Dict["qsize"] = bi("qsize", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		p.mu.Lock()
+		n := len(p.items)
+		p.mu.Unlock()
+		return &object.Int{V: int64(n)}, nil
+	})
+	qCls.Dict["empty"] = bi("empty", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		p.mu.Lock()
+		n := len(p.items)
+		p.mu.Unlock()
+		return object.GetBool(n == 0), nil
+	})
+	qCls.Dict["full"] = bi("full", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		p.mu.Lock()
+		n, m := len(p.items), p.maxsz
+		p.mu.Unlock()
+		return object.GetBool(m > 0 && n >= m), nil
+	})
+	m.Dict["Queue"] = qCls
+
+	// ---- Lock ----
+	lCls := &object.TypeObj{Name: "Lock", Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}}
+	lCls.Dict["__init__"] = primInit("Lock")
+	lCls.Dict["acquire"] = bi("acquire", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		return ip.newGenerator("Lock.acquire", func(yield func(object.Object) object.Object) {
+			for {
+				p.mu.Lock()
+				if !p.locked {
+					p.locked = true
+					p.mu.Unlock()
+					break
+				}
+				c := make(chan struct{})
+				p.lockW = append(p.lockW, c)
+				p.mu.Unlock()
+				<-c
+			}
+			yield(object.TrueObj)
+		}), nil
+	})
+	lCls.Dict["release"] = bi("release", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		p.mu.Lock()
+		if !p.locked {
+			p.mu.Unlock()
+			ip.RuntimeErr("release unlocked lock")
+			return object.None, nil
+		}
+		p.locked = false
+		wakeOne(&p.lockW)
+		p.mu.Unlock()
+		return object.None, nil
+	})
+	lCls.Dict["locked"] = bi("locked", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		p.mu.Lock()
+		v := p.locked
+		p.mu.Unlock()
+		return object.GetBool(v), nil
+	})
+	lCls.Dict["__aenter__"] = bi("__aenter__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		return ip.newGenerator("Lock.__aenter__", func(yield func(object.Object) object.Object) {
+			for {
+				p.mu.Lock()
+				if !p.locked {
+					p.locked = true
+					p.mu.Unlock()
+					break
+				}
+				c := make(chan struct{})
+				p.lockW = append(p.lockW, c)
+				p.mu.Unlock()
+				<-c
+			}
+			yield(object.None)
+		}), nil
+	})
+	lCls.Dict["__aexit__"] = bi("__aexit__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		return ip.newGenerator("Lock.__aexit__", func(yield func(object.Object) object.Object) {
+			p.mu.Lock()
+			if p.locked {
+				p.locked = false
+				wakeOne(&p.lockW)
+			}
+			p.mu.Unlock()
+			yield(object.None)
+		}), nil
+	})
+	m.Dict["Lock"] = lCls
+
+	// ---- Event ----
+	eCls := &object.TypeObj{Name: "Event", Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}}
+	eCls.Dict["__init__"] = primInit("Event")
+	eCls.Dict["set"] = bi("set", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		p.mu.Lock()
+		p.flag = true
+		wakeAll(&p.evW)
+		p.mu.Unlock()
+		return object.None, nil
+	})
+	eCls.Dict["clear"] = bi("clear", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		p.mu.Lock()
+		p.flag = false
+		p.mu.Unlock()
+		return object.None, nil
+	})
+	eCls.Dict["is_set"] = bi("is_set", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		p.mu.Lock()
+		v := p.flag
+		p.mu.Unlock()
+		return object.GetBool(v), nil
+	})
+	eCls.Dict["wait"] = bi("wait", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+		p := mustPrim(a)
+		return ip.newGenerator("Event.wait", func(yield func(object.Object) object.Object) {
+			for {
+				p.mu.Lock()
+				if p.flag {
+					p.mu.Unlock()
+					break
+				}
+				c := make(chan struct{})
+				p.evW = append(p.evW, c)
+				p.mu.Unlock()
+				<-c
+			}
+			yield(object.TrueObj)
+		}), nil
+	})
+	m.Dict["Event"] = eCls
+
 	return m
 }
 
@@ -2984,6 +3398,205 @@ func (ip *Interp) spawnTask(coro object.Object, name string) *object.Task {
 		t.Result = ip.awaitValue(coro)
 	}()
 	return t
+}
+
+// ==================== typing 泛型别名 ====================
+
+// typingAliasObj typing 泛型别名（typing.List[int] / typing.Optional[str] ...）。
+// 不用 *object.Instance 承载：Dict.Repr 直接调 object 层 Repr()，Instance 的
+// Repr 固定为 "<X object>"，别名一旦嵌进 __annotations__ 打印就丢信息。
+type typingAliasObj struct {
+	origin object.Object
+	args   []object.Object
+	text   string
+}
+
+func (a *typingAliasObj) Type() *object.TypeObj { return typingAliasType }
+func (a *typingAliasObj) Repr() string          { return a.text }
+func (a *typingAliasObj) Str() string           { return a.text }
+
+// typingSpecialForm typing 特殊形式（Union / Optional / Literal）：
+// CPython 里它们是 _SpecialForm，repr 为 "typing.Union" 这种裸名。
+type typingSpecialForm struct {
+	text string
+}
+
+func (f *typingSpecialForm) Type() *object.TypeObj { return typingSpecialFormType }
+func (f *typingSpecialForm) Repr() string          { return f.text }
+func (f *typingSpecialForm) Str() string           { return f.text }
+
+var (
+	typingAliasType       = &object.TypeObj{Name: "_GenericAlias", Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}, Module: "typing"}
+	typingSpecialFormType = &object.TypeObj{Name: "_SpecialForm", Bases: []*object.TypeObj{object.ObjectType}, Dict: map[string]object.Object{}, Module: "typing"}
+)
+
+// typingGenericSpec 泛型名字 → 下标语义。
+// origin 即 __origin__（typing.get_origin 的返回值）：List→list、Dict→dict、
+// Optional/Union→typing.Union 特殊形式。
+type typingGenericSpec struct {
+	origin  object.Object
+	display string
+	kind    int
+}
+
+const (
+	tgPlain    = iota // 下标原样铺开（List/Dict/Tuple/Callable ...）
+	tgOptional        // X → (X, NoneType)，origin = typing.Union
+	tgUnion           // (A, B) → (A, B)，origin = typing.Union
+)
+
+// typingGenericRegistry key 用对象指针做身份（TypeObj / special form 都是指针，可比）
+var typingGenericRegistry = map[object.Object]*typingGenericSpec{}
+
+// typingUnionForm typing.Union 特殊形式本体（既是 get_origin 的返回值，也是 Union[...] 的下标基座）
+var typingUnionForm = &typingSpecialForm{text: "typing.Union"}
+
+// typingArgRepr 别名 repr 里单个参数的显示名（对齐 CPython _type_repr：类用裸名）
+func (ip *Interp) typingArgRepr(o object.Object) string {
+	switch v := o.(type) {
+	case *object.TypeObj:
+		if v.Name != "" {
+			return v.Name
+		}
+	case *typingAliasObj:
+		return v.text
+	case *typingSpecialForm:
+		return v.text
+	case *object.List:
+		parts := make([]string, len(v.Items))
+		for i, it := range v.Items {
+			parts[i] = ip.typingArgRepr(it)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	case *object.Tuple:
+		parts := make([]string, len(v.Items))
+		for i, it := range v.Items {
+			parts[i] = ip.typingArgRepr(it)
+		}
+		return "(" + strings.Join(parts, ", ") + ")"
+	}
+	return ip.Repr(o)
+}
+
+// makeTypingAlias 处理 typing 泛型下标：typing.List[int] → typingAliasObj。
+// 返回 (别名, true) 表示已接管；否则交回 GetItem 走原生路径（list[int] 等 PEP 585）。
+func (ip *Interp) makeTypingAlias(base object.Object, idx object.Object) (object.Object, bool) {
+	spec := typingGenericRegistry[base]
+	if spec == nil {
+		return nil, false
+	}
+	// 空下标 `List[]` 这类畸形写法直接放行给原逻辑
+	args := []object.Object{idx}
+	if tup, ok := idx.(*object.Tuple); ok {
+		args = tup.Items
+	}
+	// textArgs = repr 里显示的参数（CPython：Optional[str] 只显示 str，
+	// 但 get_args 返回 (str, NoneType)）——两者必须分开算，否则
+	// `typing.Optional[str, NoneType]` 这种假 repr 会污染 __annotations__ 打印。
+	textArgs := args
+	switch spec.kind {
+	case tgOptional:
+		if len(args) == 1 {
+			textArgs = args
+		}
+		args = append(append([]object.Object{}, args...), object.NoneType)
+	case tgUnion:
+		if len(args) == 0 {
+			args = []object.Object{idx}
+			textArgs = args
+		}
+	}
+	if len(args) == 1 && args[0] == nil {
+		return nil, false
+	}
+	parts := make([]string, len(textArgs))
+	for i, a := range textArgs {
+		parts[i] = ip.typingArgRepr(a)
+	}
+	return &typingAliasObj{origin: spec.origin, args: args, text: spec.display + "[" + strings.Join(parts, ", ") + "]"}, true
+}
+
+// typingGetOrigin typing.get_origin 口径
+func typingGetOrigin(o object.Object) object.Object {
+	switch v := o.(type) {
+	case *typingAliasObj:
+		return v.origin
+	case *object.Instance:
+		// PEP 585 别名（list[int]）与 PEP 604 并集（int | str）
+		if v.Class == genericAliasType || v.Class == unionTypeType {
+			if o, ok := v.Dict["__origin__"]; ok {
+				return o
+			}
+			if v.Class == unionTypeType {
+				return typingUnionForm
+			}
+		}
+	}
+	return object.None
+}
+
+// typingGetArgs typing.get_args 口径（非别名返回空元组）
+func typingGetArgs(o object.Object) *object.Tuple {
+	items := func(v object.Object) *object.Tuple {
+		if t, ok := v.(*object.Tuple); ok {
+			return t
+		}
+		return &object.Tuple{Items: []object.Object{v}}
+	}
+	switch v := o.(type) {
+	case *typingAliasObj:
+		return &object.Tuple{Items: v.args}
+	case *object.Instance:
+		if v.Class == genericAliasType || v.Class == unionTypeType {
+			if a, ok := v.Dict["__args__"]; ok {
+				return items(a)
+			}
+		}
+	}
+	return &object.Tuple{}
+}
+
+// resolveAnnString 展开字符串注解（PEP 563 / 手写 'List[int]'）：
+// 在模块全局 + typing 命名空间里求值；失败则原样返回字符串，绝不因注解炸掉整个导入。
+func (ip *Interp) resolveAnnString(src string) object.Object {
+	expr, errs := parseExprString(src)
+	if len(errs) > 0 || expr == nil {
+		return &object.Str{V: src}
+	}
+	var res object.Object
+	pe := ip.protect(func() { res = ip.evalExpr(expr, ip.Globals) })
+	if pe == nil && res != nil {
+		return res
+	}
+	// 回退：把 typing 模块全部名字注入一层临时作用域再试（用户多半只 import typing）
+	if tm, ok := ip.Modules["typing"]; ok {
+		env := object.NewEnv(ip.Globals)
+		env.Globals = ip.Globals
+		for k, v := range tm.Dict {
+			env.Vars[k] = v
+		}
+		res = nil
+		if pe2 := ip.protect(func() { res = ip.evalExpr(expr, env) }); pe2 == nil && res != nil {
+			return res
+		}
+	}
+	return &object.Str{V: src}
+}
+
+// collectAnnHints 把注解字典展开成 get_type_hints 的返回值（键序保持）
+func (ip *Interp) collectAnnHints(src *object.Dict) *object.Dict {
+	out := &object.Dict{}
+	if src == nil {
+		return out
+	}
+	for i, k := range src.Keys {
+		v := src.Vals[i]
+		if s, ok := v.(*object.Str); ok {
+			v = ip.resolveAnnString(s.V)
+		}
+		out.Set(k, v)
+	}
+	return out
 }
 
 // ==================== typing / dataclasses ====================
@@ -3053,21 +3666,49 @@ func modTyping(ip *Interp) *object.Module {
 		ip.TypeError("Expected code to be unreachable")
 		return object.None, nil
 	})
+	// get_type_hints：支持函数 / 类（按 MRO 由基到子合并），字符串注解当场展开
 	m.Dict["get_type_hints"] = bi("get_type_hints", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-		if len(a) > 0 {
-			if t, ok := a[0].(*object.TypeObj); ok {
-				if ann, ok := t.Dict["__annotations__"]; ok {
-					return ann, nil
+		if len(a) == 0 {
+			return &object.Dict{}, nil
+		}
+		var ann *object.Dict
+		switch o := a[0].(type) {
+		case *object.Function:
+			if v, ok := o.GetAttr("__annotations__"); ok {
+				ann, _ = v.(*object.Dict)
+			}
+		// object.Builtin 没有属性字典（无 GetAttr），内建函数无注解可合并：跳过。
+		case *object.TypeObj:
+			// CPython：从最基类到当前类依次合并，子类同名覆盖
+			mro := o.MRO()
+			for i := len(mro) - 1; i >= 0; i-- {
+				if d, ok := mro[i].Dict["__annotations__"].(*object.Dict); ok {
+					if ann == nil {
+						ann = &object.Dict{}
+					}
+					for j, kk := range d.Keys {
+						ann.Set(kk, d.Vals[j])
+					}
 				}
 			}
+		case *object.Module:
+			if v, ok := o.Dict["__annotations__"]; ok {
+				ann, _ = v.(*object.Dict)
+			}
 		}
-		return &object.Dict{}, nil
+		return ip.collectAnnHints(ann), nil
 	})
 	m.Dict["get_origin"] = bi("get_origin", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-		return object.None, nil
+		if len(a) == 0 {
+			return object.None, nil
+		}
+		return typingGetOrigin(a[0]), nil
 	})
 	m.Dict["get_args"] = bi("get_args", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
-		return &object.Tuple{}, nil
+		if len(a) == 0 {
+			return &object.Tuple{}, nil
+		}
+		return typingGetArgs(a[0]), nil
 	})
 	for _, n := range []string{"List", "Dict", "Tuple", "Set", "Optional", "Any", "Union", "Callable", "Iterable", "Iterator", "Sequence", "Mapping", "Type",
 		"Generic", "TypedDict", "Protocol", "Literal", "Final", "ClassVar", "NoReturn", "TypeAlias", "Self",
@@ -3081,6 +3722,64 @@ func modTyping(ip *Interp) *object.Module {
 		"TypeGuard", "TypeAliasType", "ForwardRef", "Pattern", "Match"} {
 		m.Dict[n] = &object.TypeObj{Name: n, Dict: map[string]object.Object{}}
 	}
+
+	// ---- 泛型下标注册：typing.List[int] / Dict[str, List[int]] / Callable[[int], str] ----
+	// __origin__ 对齐 CPython：List→list、Dict→dict、Tuple→tuple、Set/FrozenSet→set。
+	// 容器 ABC（Iterable/Sequence/...）CPython 指向 collections.abc.X，这里先指向自身，
+	// 保证 get_origin/get_args 能拿到确定值；语义细节待后续对齐。
+	genericOrigins := map[string]object.Object{
+		"List": object.ListType, "Dict": object.DictType, "Tuple": object.TupleType,
+		"Set": object.SetType, "FrozenSet": object.SetType, "DefaultDict": object.DictType,
+	}
+	// 容器 ABC 的 __origin__ 必须是 collections.abc 的真实类。
+	// 否则 `class X(MutableMapping[str, str])` 的基类是 typing 的空占位 TypeObj，
+	// MRO 变成 [X, Generic, MutableMapping, object]——没有 Mapping，
+	// 实例连 .get/.keys/.update 都没有（urllib3 RecentlyUsedContainer，第16轮实测）。
+	if abcMod, ok := ip.Modules["collections.abc"]; ok {
+		pairs := map[string]string{
+			"Mapping": "Mapping", "MutableMapping": "MutableMapping",
+			"Iterable": "Iterable", "Iterator": "Iterator",
+			"Sequence": "Sequence", "MutableSequence": "MutableSequence",
+			"AbstractSet": "Set", "MutableSet": "MutableSet",
+			"Collection": "Collection", "Container": "Container",
+			"Reversible": "Reversible", "Sized": "Sized",
+			"Hashable": "Hashable", "Callable": "Callable",
+			"Generator": "Generator", "Awaitable": "Awaitable", "Coroutine": "Coroutine",
+			"AsyncIterable": "AsyncIterable", "AsyncIterator": "AsyncIterator",
+			"AsyncGenerator": "AsyncGenerator",
+			"KeysView":       "KeysView", "ValuesView": "ValuesView", "ItemsView": "ItemsView",
+		}
+		for tn, an := range pairs {
+			if v, ok := abcMod.Dict[an]; ok {
+				genericOrigins[tn] = v
+			}
+		}
+	}
+	for _, n := range []string{"List", "Dict", "Tuple", "Set", "FrozenSet", "DefaultDict", "Deque", "Counter",
+		"OrderedDict", "ChainMap", "Iterable", "Iterator", "Sequence", "Mapping", "MutableMapping",
+		"MutableSequence", "MutableSet", "Generator", "AsyncIterable", "AsyncIterator", "AsyncGenerator",
+		"Awaitable", "Coroutine", "ContextManager", "AsyncContextManager", "Type", "KeysView", "ValuesView",
+		"ItemsView", "AbstractSet", "Collection", "Container", "Reversible", "Pattern", "Match", "Callable"} {
+		t, ok := m.Dict[n].(*object.TypeObj)
+		if !ok {
+			continue
+		}
+		origin := genericOrigins[n]
+		if origin == nil {
+			origin = t
+		}
+		typingGenericRegistry[t] = &typingGenericSpec{origin: origin, display: "typing." + n, kind: tgPlain}
+	}
+	// Union / Optional / Literal：CPython 里是 _SpecialForm（repr 为裸名 typing.Union），
+	// Optional 的 __origin__ 固定为 typing.Union。
+	typingGenericRegistry[typingUnionForm] = &typingGenericSpec{origin: typingUnionForm, display: "typing.Union", kind: tgUnion}
+	m.Dict["Union"] = typingUnionForm
+	optForm := &typingSpecialForm{text: "typing.Optional"}
+	typingGenericRegistry[optForm] = &typingGenericSpec{origin: typingUnionForm, display: "typing.Optional", kind: tgOptional}
+	m.Dict["Optional"] = optForm
+	litForm := &typingSpecialForm{text: "typing.Literal"}
+	typingGenericRegistry[litForm] = &typingGenericSpec{origin: litForm, display: "typing.Literal", kind: tgPlain}
+	m.Dict["Literal"] = litForm
 	return m
 }
 

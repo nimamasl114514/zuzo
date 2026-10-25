@@ -93,10 +93,26 @@ func (ip *Interp) evalExpr(e ast.Expr, env *object.Env) object.Object {
 		return ip.evalCall(n, env)
 	case *ast.Attribute:
 		obj := ip.evalExpr(n.Value, env)
+		// typing 别名的属性（__origin__ / __args__）：get_origin/get_args 之外，
+		// 大量库直接读别名属性，这里补上最小闭环。
+		if al, ok := obj.(*typingAliasObj); ok {
+			switch n.Attr {
+			case "__origin__":
+				return al.origin
+			case "__args__":
+				return &object.Tuple{Items: al.args}
+			case "__module__":
+				return &object.Str{V: "typing"}
+			}
+		}
 		return ip.GetAttr(obj, n.Attr)
 	case *ast.Subscript:
 		obj := ip.evalExpr(n.Value, env)
 		idx := ip.evalSubscript(obj, n.Slice, env)
+		// typing.List[int] 走 typing 口径的别名（__origin__=list）；其它交给 GetItem（PEP 585）
+		if al, ok := ip.makeTypingAlias(obj, idx); ok {
+			return al
+		}
 		return ip.GetItem(obj, idx)
 	case *ast.IfExp:
 		if object.Truthy(ip.evalExpr(n.Test, env)) {
@@ -468,6 +484,30 @@ func (ip *Interp) makeFunction(node *ast.FuncDef, env *object.Env) object.Object
 	}
 	fn.IsGenerator = containsYield(node.Body)
 	fn.Doc = extractDoc(node.Body)
+	// 函数注解：CPython 在 def 执行时就把注解求值存进 __annotations__，
+	// 键序固定为“参数顺序 + return”。缺了它 inspect / typing.get_type_hints /
+	// dataclasses / pydantic 这类反射链全断。
+	ann := &object.Dict{}
+	hasAnn := false
+	for _, a := range node.Params.Args {
+		if a.Annotation != nil {
+			ann.Set(&object.Str{V: a.Name}, ip.evalAnnotation(a.Annotation, env))
+			hasAnn = true
+		}
+	}
+	for _, a := range node.Params.Kwonly {
+		if a.Annotation != nil {
+			ann.Set(&object.Str{V: a.Name}, ip.evalAnnotation(a.Annotation, env))
+			hasAnn = true
+		}
+	}
+	if node.Returns != nil {
+		ann.Set(&object.Str{V: "return"}, ip.evalAnnotation(node.Returns, env))
+		hasAnn = true
+	}
+	if hasAnn {
+		fn.Dict.Set(&object.Str{V: "__annotations__"}, ann)
+	}
 	var result object.Object = fn
 	for i := len(node.Decorators) - 1; i >= 0; i-- {
 		dec := ip.evalExpr(node.Decorators[i], env)
@@ -581,9 +621,48 @@ func (ip *Interp) makeClass(node *ast.ClassDef, env *object.Env) *object.TypeObj
 		}
 	}
 	if len(classEnv.ClassAnnotations) > 0 {
+		// 类 __annotations__：值必须是真的注解对象（int / typing.List[int] / ...），
+		// 不是占位串；键序 = 类体执行顺序（ClassAnnotations 已按执行顺序记录）。
+		// 注解表达式从 AST 回收（AnnAssign 只记了名字，含 if/try 内的分支声明）。
+		exprs := map[string]ast.Expr{}
+		var walk func(stmts []ast.Stmt)
+		walk = func(stmts []ast.Stmt) {
+			for _, s := range stmts {
+				switch st := s.(type) {
+				case *ast.AnnAssign:
+					if nm, ok := st.Target.(*ast.Name); ok && st.Annotation != nil {
+						exprs[nm.Id] = st.Annotation
+					}
+				case *ast.If:
+					walk(st.Body)
+					walk(st.Orelse)
+				case *ast.Try:
+					walk(st.Body)
+					for _, h := range st.Handlers {
+						walk(h.Body)
+					}
+					walk(st.Orelse)
+					walk(st.Finally)
+				case *ast.For:
+					walk(st.Body)
+					walk(st.Orelse)
+				case *ast.While:
+					walk(st.Body)
+					walk(st.Orelse)
+				case *ast.With:
+					walk(st.Body)
+				}
+			}
+		}
+		walk(node.Body)
 		ann := &object.Dict{}
 		for _, name := range classEnv.ClassAnnotations {
-			ann.Set(&object.Str{V: name}, &object.Str{V: "annotation"})
+			e, ok := exprs[name]
+			if !ok {
+				ann.Set(&object.Str{V: name}, &object.Str{V: "annotation"})
+				continue
+			}
+			ann.Set(&object.Str{V: name}, ip.evalAnnotation(e, classEnv))
 		}
 		cls.Dict["__annotations__"] = ann
 	}
@@ -604,7 +683,18 @@ func (ip *Interp) makeClass(node *ast.ClassDef, env *object.Env) *object.TypeObj
 			basesItems = append(basesItems, b)
 		}
 		newFn := ip.GetAttr(mcls, "__new__")
-		res := ip.Call(newFn, []object.Object{mcls, &object.Str{V: node.Name}, &object.Tuple{Items: basesItems}, ns}, nil)
+		// GetAttr 已把 mcls 绑成 self（BoundMethod / Builtin.Self），调用时只需再传
+		// (name, bases, namespace)；旧写法额外传一遍 mcls → ABCMeta.__new__ 收到 5 个
+		// 位置参数而报 “takes 4 positional arguments but 5 were given”（第16轮实测，
+		// pathlib 在 _collections_abc.py:1100 断掉）。
+		nameObj := &object.Str{V: node.Name}
+		basesObj := &object.Tuple{Items: basesItems}
+		callArgs := []object.Object{nameObj, basesObj, ns}
+		// BoundMethod 自带 self（mcls）；未绑定的 Builtin/Function 需要显式补 mcls。
+		if _, bound := newFn.(*object.BoundMethod); !bound {
+			callArgs = []object.Object{mcls, nameObj, basesObj, ns}
+		}
+		res := ip.Call(newFn, callArgs, nil)
 		if t, ok := res.(*object.TypeObj); ok {
 			cls = t
 			if cls.MetaClass == nil {
@@ -880,6 +970,15 @@ func (ip *Interp) asBaseType(v object.Object) (*object.TypeObj, bool) {
 	// PEP 560：泛型别名作基类（class Foo(dict[str, int])）取 __origin__
 	if inst, ok := v.(*object.Instance); ok && inst.Class == genericAliasType {
 		if o, ok := inst.Dict["__origin__"].(*object.TypeObj); ok {
+			return o, true
+		}
+	}
+	// typing.MutableMapping[str, str] 这类别名（typingAliasObj）作基类同理：
+	// 真实基类 = origin（collections.abc.MutableMapping），泛型参数只是元信息。
+	// 缺这一分支：urllib3/_collections.py:63 `class HTTPHeaderDict(MutableMapping[str, str])`
+	// 直接报 class bases must be types（第16轮实测）。
+	if al, ok := v.(*typingAliasObj); ok {
+		if o, ok := al.origin.(*object.TypeObj); ok {
 			return o, true
 		}
 	}

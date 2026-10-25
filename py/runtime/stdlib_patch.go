@@ -252,7 +252,10 @@ func addUrllibParseExtras(ip *Interp, m *object.Module) {
 	m.Dict["urlunsplit"] = bi("urlunsplit", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
 		parts := ip.ToSlice(a[0])
 		get := func(i int) string {
-			if i < len(parts) {
+			// CPython 的 urlunsplit 把 None 分量当空串（不拼出字面量 "None"）；
+			// urllib3 的 Url.url 属性会传 None 进来，旧写法产出
+			// `.../hello?x=1#None` 与 `?None#None`（第16轮实测）。
+			if i < len(parts) && parts[i] != object.None {
 				return parts[i].Str()
 			}
 			return ""

@@ -272,13 +272,27 @@ func (ip *Interp) initExceptions() {
 		object.TypeType.Dict = map[string]object.Object{}
 	}
 	object.TypeType.Dict["__new__"] = &object.Builtin{Name: "__new__", Fn: func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
-		if len(args) < 4 {
-			ip.TypeError("type.__new__() takes at least 4 arguments")
+		// 两种调用形态：
+		//   ① 3 个参数（GetAttr 绑定后）：(name, bases, namespace)
+		//   ② 4 个参数（显式传 mcls，如 ABCMeta.__new__ 里 super().__new__(mcls, name, bases, ns)）
+		// 旧实现固定取 args[0..3]，形态② 会把 mcls 当 name、name 当 bases，建出错误类。
+		off := 0
+		if len(args) >= 4 {
+			if _, ok := args[0].(*object.TypeObj); ok {
+				// 只有「参数 1 不是类名（str）」时才算多带了一个 mcls；
+				// 否则 (name, bases, ns) 的形态会被误判成 (mcls, name, bases)。
+				if _, isStr := args[1].(*object.Str); !isStr {
+					off = 1
+				}
+			}
 		}
-		mcls, _ := args[0].(*object.TypeObj)
-		name := args[1].Str()
+		if len(args) < off+3 {
+			ip.TypeError("type.__new__() takes at least 3 arguments")
+		}
+		mcls, _ := args[off].(*object.TypeObj)
+		name := args[off+1].Str()
 		cls := &object.TypeObj{Name: name, Dict: map[string]object.Object{}, MetaClass: mcls}
-		for _, b := range ip.ToSlice(args[2]) {
+		for _, b := range ip.ToSlice(args[off+2]) {
 			if bt, ok := b.(*object.TypeObj); ok {
 				cls.Bases = append(cls.Bases, bt)
 				if bt.IsExc {
@@ -289,7 +303,7 @@ func (ip *Interp) initExceptions() {
 		if len(cls.Bases) == 0 {
 			cls.Bases = []*object.TypeObj{object.ObjectType}
 		}
-		switch ns := args[3].(type) {
+		switch ns := args[off+3].(type) {
 		case *object.Dict:
 			for i, k := range ns.Keys {
 				cls.Dict[k.Str()] = ns.Vals[i]
@@ -640,12 +654,15 @@ func registerBuiltins(ip *Interp) {
 		return &object.List{Items: items}, nil
 	})
 	ip.reg("reversed", func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+		// CPython 语义：reversed() 返回 list_reverseiterator，不是 list。
+		// 旧写法返回 List 导致 `reversed(a) == a[::-1]` 为 True（CPython 为 False），
+		// 且 list(reversed(x)) / next(reversed(x)) 的惰性语义丢失。
 		items := ip.ToSlice(args[0])
 		out := make([]object.Object, len(items))
 		for i := range items {
 			out[len(items)-1-i] = items[i]
 		}
-		return &object.List{Items: out}, nil
+		return &object.Iterator{Items: out}, nil
 	})
 	ip.reg("enumerate", func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
 		if len(args) == 0 {
@@ -927,6 +944,15 @@ func registerBuiltins(ip *Interp) {
 		return &object.Str{V: string(rune(n))}, nil
 	})
 	ip.reg("ord", func(args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+		// CPython：ord() 也接受长度为 1 的 bytes（`ord(b"%") == 37`）。
+		// urllib3/util/url.py 的 _encode_invalid_chars 用 `ord(uri_bytes[i:i+1])`
+		// 逐字节处理，缺这条整个 URL 编码链路抛 TypeError（第16轮实测）。
+		if bb, isBytes := args[0].(*object.Bytes); isBytes {
+			if len(bb.V) != 1 {
+				ip.TypeError("ord() expected a character, but bytes of length %d found", len(bb.V))
+			}
+			return &object.Int{V: int64(bb.V[0])}, nil
+		}
 		s, ok := args[0].(*object.Str)
 		if !ok {
 			ip.TypeError("ord() expected string")

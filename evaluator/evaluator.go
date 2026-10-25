@@ -1080,9 +1080,23 @@ func isTruthy(obj object.Object) bool {
 		return true
 	case FALSE:
 		return false
-	default:
-		return true
 	}
+	// 数值与容器按「空 = 假」判定（与 Python / JS 一致）。
+	// 旧实现 default 一律为真，`当 0 {}` 条件恒真 → 死循环；
+	// 第16轮 Go 原生 fuzz（FuzzZuzoExec）用输入 `当 0%1{0"000` 实测触发。
+	switch v := obj.(type) {
+	case *object.Integer:
+		return v.Value != 0
+	case *object.Float:
+		return v.Value != 0
+	case *object.String:
+		return v.Value != ""
+	case *object.Array:
+		return len(v.Elements) > 0
+	case *object.Hash:
+		return len(v.Keys) > 0
+	}
+	return true
 }
 
 func nativeBoolToBooleanObject(b bool) *object.Boolean {

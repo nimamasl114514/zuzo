@@ -1,0 +1,10 @@
+s = '0123456789'
+print(s[5] if -len(s) <= 5 < len(s) else 'OOR')
+print(s[0] if -len(s) <= 0 < len(s) else 'OOR')
+print(s[-1] if -len(s) <= -1 < len(s) else 'OOR')
+print(s[1] if -len(s) <= 1 < len(s) else 'OOR')
+print(s[20] if -len(s) <= 20 < len(s) else 'OOR')
+print(s[2:6], s[:3], s[4:], s[:])
+print(s[::2], s[1::3], s[::-2])
+print(s[6:2:-1], s[-1:-5:-1])
+print(len(s), s[-1], s[0])

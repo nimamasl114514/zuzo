@@ -518,11 +518,34 @@ func (l *Lexer) scanStringBodyRaw(prefix string) (string, bool, error) {
 		l.advance()
 	}
 	var sb strings.Builder
+	// brace 记录 f-string 插值字段的嵌套深度（PEP 701）。
+	// depth > 0 时同种引号不再是 f-string 的结束符，而是字段内嵌套的字符串字面量。
+	brace := 0
 	for {
 		if l.eof() {
 			return sb.String(), false, fmt.Errorf("字符串未闭合")
 		}
 		c := l.ch()
+		if isF {
+			// PEP 701：插值字段内的字符串独立扫描（允许与 f-string 同引号、允许嵌套 f-string）。
+			// 未处理时 f'{_safe_string(e, '__notes__', repr)}' 会在内层 '"' 处提前截断，
+			// 实锤 CPython 3.12 traceback.py:745 直载报「期望 ]，实际 __notes__」。
+			if brace > 0 && (c == '\'' || c == '"') {
+				l.scanFStringNestedString(&sb)
+				continue
+			}
+			// 字面量里的 {{ / }} 是转义大括号，不参与字段深度计数。
+			if brace == 0 && c == '{' && l.peek(1) == '{' {
+				sb.WriteRune(l.advance())
+				sb.WriteRune(l.advance())
+				continue
+			}
+			if brace == 0 && c == '}' && l.peek(1) == '}' {
+				sb.WriteRune(l.advance())
+				sb.WriteRune(l.advance())
+				continue
+			}
+		}
 		if triple {
 			if c == q && l.peek(1) == q && l.peek(2) == q {
 				l.advance()
@@ -531,12 +554,21 @@ func (l *Lexer) scanStringBodyRaw(prefix string) (string, bool, error) {
 				break
 			}
 		} else {
-			if c == q {
+			if c == q && brace == 0 {
 				l.advance()
 				break
 			}
 			if c == '\n' {
 				return sb.String(), false, fmt.Errorf("单行字符串未闭合")
+			}
+		}
+		if isF {
+			// 字段深度：brace==0 遇 '{' 进入字段；brace>0 遇 '}' 出字段。
+			// 字段内部的引号已在上方独立扫描，不会干扰计数。
+			if brace == 0 && c == '{' {
+				brace++
+			} else if brace > 0 && c == '}' {
+				brace--
 			}
 		}
 		if c == '\\' && raw {
@@ -627,6 +659,44 @@ func (l *Lexer) scanStringBodyRaw(prefix string) (string, bool, error) {
 		sb.WriteRune(l.advance())
 	}
 	return sb.String(), false, nil
+}
+
+// scanFStringNestedString 扫描 f-string 插值字段内嵌套的字符串字面量（PEP 701）。
+//
+// 与普通字符串不同：内容逐字符原样回填（不解码转义），交由 parser 重新解析；
+// 因此这里只负责定位字面量边界（含前缀后的引号、三引号、反斜杠转义）。
+func (l *Lexer) scanFStringNestedString(sb *strings.Builder) {
+	q := l.ch()
+	triple := l.peek(1) == q && l.peek(2) == q
+	sb.WriteRune(l.advance())
+	if triple {
+		sb.WriteRune(l.advance())
+		sb.WriteRune(l.advance())
+	}
+	for !l.eof() {
+		c := l.ch()
+		if c == '\\' {
+			sb.WriteRune(l.advance())
+			if !l.eof() {
+				sb.WriteRune(l.advance())
+			}
+			continue
+		}
+		if triple {
+			if c == q && l.peek(1) == q && l.peek(2) == q {
+				sb.WriteRune(l.advance())
+				sb.WriteRune(l.advance())
+				sb.WriteRune(l.advance())
+				return
+			}
+			sb.WriteRune(l.advance())
+			continue
+		}
+		sb.WriteRune(l.advance())
+		if c == q || c == '\n' {
+			return
+		}
+	}
 }
 
 // scanNumber 扫描数字字面量

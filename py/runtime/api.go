@@ -38,6 +38,25 @@ func (ip *Interp) builtinOpen(args []object.Object, kwargs map[string]object.Obj
 		FileClass.Dict["__iter__"] = bi("__iter__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
 			return a[0], nil
 		})
+		// __next__：`for line in open(...)` 的直接依赖。
+		// 旧实现只有 __iter__ 返回 self，没有 __next__，报
+		// "TextIOWrapper object is not an iterator"（第16轮 probe_urllib3 实测）。
+		FileClass.Dict["__next__"] = bi("__next__", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
+			if len(a) > 0 {
+				if inst, ok2 := a[0].(*object.Instance); ok2 {
+					if rd, has := inst.Dict["readline"]; has {
+						line := ip.Call(rd, nil, nil)
+						if s, isStr := line.(*object.Str); isStr && s.V == "" {
+							ip.raise(ip.excType("StopIteration"), "")
+						} else {
+							return line, nil
+						}
+					}
+				}
+			}
+			ip.raise(ip.excType("StopIteration"), "")
+			return object.None, nil
+		})
 	}
 	// 支持 pathlib.Path 等 PathLike：走 __fspath__ 协议拿真实路径
 	// （旧写 args[0].Str() 会把 Path 对象渲染成 "open <Path object>"，打开必失败）

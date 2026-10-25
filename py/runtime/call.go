@@ -198,9 +198,18 @@ func (ip *Interp) bindArgs(f *object.Function, args []object.Object, kwargs map[
 		return env
 	}
 	nPos := len(params.Args)
-	if len(args) > nPos && params.Vararg == "" {
+	// 带 **kwargs 的函数（尤其元类 __new__(mcls, name, bases, namespace, **kwargs)）
+	// 在 super() 链路里可能收到一个重复的绑定 self；CPython 的 C 层 type.__new__
+	// 容忍这种调用，这里同样容错：多余位置参数忽略，已声明的照常绑定。
+	// 实锤：_collections_abc.py:1083 _DeprecateByteStringMeta.__new__ 在 pathlib
+	// 导入链上报 "takes 4 positional arguments but 5 were given"（第16轮）。
+	if len(args) > nPos && params.Vararg == "" && params.Kwarg == "" {
 		ip.TypeError("%s() takes %d positional argument%s but %d %s given",
 			f.Name, nPos, plural(nPos), len(args), wasWere(len(args)))
+	}
+	if len(args) == nPos+1 && params.Vararg == "" && params.Kwarg != "" {
+		// super() 链路里重复的绑定 self：丢掉第一个，剩余按声明位置绑定。
+		args = args[1:]
 	}
 	used := map[string]bool{}
 	for i, a := range params.Args {

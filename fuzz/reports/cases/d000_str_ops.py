@@ -1,0 +1,11 @@
+s = 'abcabc'
+print(s.endswith("yz"))
+print(s.find("b"))
+print(s.strip())
+print(s.rjust(11, "."))
+print(s.center(11, "*"))
+print(s.startswith("ab"))
+print(s[1:5], s[-3:], s[::2], s[::-1])
+print(s[100:200], s[-100:2])
+print(len(s), s * 2)
+print("a" in s, "ab" in s)

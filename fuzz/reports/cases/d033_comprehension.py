@@ -1,0 +1,6 @@
+print([i * j for i in range(3) for j in range(i)])
+print({i: i * i for i in range(3)})
+print({i % 3 for i in range(6)})
+print([[i + j for j in range(2)] for i in range(3)])
+print(sum(i for i in range(3) if i % 2))
+print([x for x in range(20) if x % 2 == 0 if x % 3 == 0])

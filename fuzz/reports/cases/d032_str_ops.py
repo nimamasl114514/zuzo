@@ -1,0 +1,11 @@
+s = 'a b c'
+print(s.strip())
+print(s.center(11, "*"))
+print(s.rfind("b"))
+print(s.upper())
+print(s.rjust(11, "."))
+print(s.find("b"))
+print(s[1:5], s[-3:], s[::2], s[::-1])
+print(s[100:200], s[-100:2])
+print(len(s), s * 2)
+print("a" in s, "ab" in s)

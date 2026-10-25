@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"sort"
@@ -531,7 +532,10 @@ func registerMethods(ip *Interp) {
 			return &object.Str{V: s}, nil
 		}
 		pad := int(w) - n
-		l := pad / 2
+		// CPython unicode_center：left = pad//2 + (pad & width & 1)
+		// 缺最后一项会让奇数余量偏向右侧（"abcabc".center(11,"*") 应为
+		// "***abcabc**"，旧实现给 "**abcabc***"，第16轮差分 fuzz 实测）。
+		l := pad/2 + (pad & int(w) & 1)
 		return &object.Str{V: strings.Repeat(fill, l) + s + strings.Repeat(fill, pad-l)}, nil
 	})
 	regMethod(object.StrType, "ljust", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
@@ -1168,6 +1172,136 @@ func registerMethods(ip *Interp) {
 	regMethod(object.BytesType, "hex", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		b := args[0].(*object.Bytes)
 		return &object.Str{V: fmt.Sprintf("%x", b.V)}, nil
+	})
+	// bytes 的基础查找/判定方法：urllib3/util/url.py 的 _encode_invalid_chars
+	// 直接调 `uri_bytes.count(b"%")`；缺 count 会让 parse_url 抛
+	// LocationParseError，requests 的每个请求在 URL 解析阶段就失败（第16轮实测）。
+	bytesSub := func(o object.Object) []byte {
+		if n, ok := object.AsInt(o); ok {
+			return []byte{byte(n)}
+		}
+		return ip.bytesOf(o)
+	}
+	regMethod(object.BytesType, "count", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		b := args[0].(*object.Bytes)
+		if len(args) < 2 {
+			ip.TypeError("count() takes at least 1 argument")
+		}
+		sub := bytesSub(args[1])
+		if len(sub) == 0 {
+			return &object.Int{V: int64(len(b.V) + 1)}, nil
+		}
+		return &object.Int{V: int64(bytes.Count(b.V, sub))}, nil
+	})
+	regMethod(object.BytesType, "find", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		b := args[0].(*object.Bytes)
+		if len(args) < 2 {
+			return &object.Int{V: -1}, nil
+		}
+		sub := bytesSub(args[1])
+		start, end := 0, len(b.V)
+		if len(args) > 2 {
+			if n, ok := object.AsInt(args[2]); ok {
+				start = clampIndex(int(n), len(b.V))
+			}
+		}
+		if len(args) > 3 {
+			if n, ok := object.AsInt(args[3]); ok {
+				end = clampIndex(int(n), len(b.V))
+			}
+		}
+		if start > end {
+			return &object.Int{V: -1}, nil
+		}
+		pos := bytes.Index(b.V[start:end], sub)
+		if pos < 0 {
+			return &object.Int{V: -1}, nil
+		}
+		return &object.Int{V: int64(start + pos)}, nil
+	})
+	regMethod(object.BytesType, "rfind", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		b := args[0].(*object.Bytes)
+		if len(args) < 2 {
+			return &object.Int{V: -1}, nil
+		}
+		sub := bytesSub(args[1])
+		pos := bytes.LastIndex(b.V, sub)
+		if pos < 0 {
+			return &object.Int{V: -1}, nil
+		}
+		return &object.Int{V: int64(pos)}, nil
+	})
+	regMethod(object.BytesType, "startswith", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		b := args[0].(*object.Bytes)
+		if len(args) < 2 {
+			return object.FalseObj, nil
+		}
+		return object.GetBool(bytes.HasPrefix(b.V, bytesSub(args[1]))), nil
+	})
+	regMethod(object.BytesType, "endswith", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		b := args[0].(*object.Bytes)
+		if len(args) < 2 {
+			return object.FalseObj, nil
+		}
+		return object.GetBool(bytes.HasSuffix(b.V, bytesSub(args[1]))), nil
+	})
+	// bytes.join / replace / strip / lower / upper：http.client 拼 header 与
+	// urllib3 的 chunked 编解码密集使用（第16轮 requests 实测）。
+	regMethod(object.BytesType, "join", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		sep := args[0].(*object.Bytes)
+		if len(args) < 2 {
+			return &object.Bytes{V: []byte{}}, nil
+		}
+		items := ip.ToSlice(args[1])
+		var out []byte
+		for i, it := range items {
+			if i > 0 {
+				out = append(out, sep.V...)
+			}
+			out = append(out, ip.bytesOf(it)...)
+		}
+		return &object.Bytes{V: out}, nil
+	})
+	regMethod(object.BytesType, "replace", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		b := args[0].(*object.Bytes)
+		if len(args) < 3 {
+			ip.TypeError("replace() takes at least 3 arguments")
+		}
+		old := bytesSub(args[1])
+		newB := bytesSub(args[2])
+		return &object.Bytes{V: bytes.ReplaceAll(b.V, old, newB)}, nil
+	})
+	regMethod(object.BytesType, "strip", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		b := args[0].(*object.Bytes)
+		cut := " \t\r\n\v\f"
+		if len(args) > 1 {
+			cut = string(bytesSub(args[1]))
+		}
+		return &object.Bytes{V: []byte(strings.Trim(string(b.V), cut))}, nil
+	})
+	regMethod(object.BytesType, "lstrip", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		b := args[0].(*object.Bytes)
+		cut := " \t\r\n\v\f"
+		if len(args) > 1 {
+			cut = string(bytesSub(args[1]))
+		}
+		return &object.Bytes{V: []byte(strings.TrimLeft(string(b.V), cut))}, nil
+	})
+	regMethod(object.BytesType, "rstrip", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		b := args[0].(*object.Bytes)
+		cut := " \t\r\n\v\f"
+		if len(args) > 1 {
+			cut = string(bytesSub(args[1]))
+		}
+		return &object.Bytes{V: []byte(strings.TrimRight(string(b.V), cut))}, nil
+	})
+	regMethod(object.BytesType, "lower", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		b := args[0].(*object.Bytes)
+		return &object.Bytes{V: bytes.ToLower(b.V)}, nil
+	})
+	regMethod(object.BytesType, "upper", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+		b := args[0].(*object.Bytes)
+		return &object.Bytes{V: bytes.ToUpper(b.V)}, nil
 	})
 	regMethod(object.BytesType, "split", func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
 		b := args[0].(*object.Bytes)

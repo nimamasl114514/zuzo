@@ -16,6 +16,7 @@ import (
 	"github.com/tamnd/gopapy/v2/parser2"
 
 	pyast "zuzo/py/ast"
+	pyparser "zuzo/py/parser"
 )
 
 // ParseFile 用 gopapy 解析 Python 源码并转换为 zuzo 内部 AST。
@@ -427,14 +428,55 @@ func (c *conv) joinedStr(n *parser2.JoinedStr) pyast.Expr {
 				out.Parts = append(out.Parts, pyast.FStringPart{Literal: s, IsLiteral: true})
 			}
 		case *parser2.FormattedValue:
-			fp := pyast.FStringPart{Expr: c.expr(part.Value)}
-			if part.Conversion > 0 {
-				fp.Conversion = byte(part.Conversion)
+			out.Parts = append(out.Parts, c.formatField(c.expr(part.Value), part))
+		}
+	}
+	return out
+}
+
+// formatField 把 gopapy 的 FormattedValue 转成 zuzo 的 FStringPart。
+//
+// 说明符含嵌套插值字段时（PEP 701：f"{v:{w}.{p}f}"），静态 Format 字串
+// 承载不了运行时求值，按 py/parser 同一套规则改写为 format(值, 说明符) 调用。
+func (c *conv) formatField(value pyast.Expr, n *parser2.FormattedValue) pyast.FStringPart {
+	fp := pyast.FStringPart{Expr: value}
+	if n.Conversion > 0 {
+		fp.Conversion = byte(n.Conversion)
+	}
+	spec, ok := n.FormatSpec.(*parser2.JoinedStr)
+	if !ok {
+		return fp
+	}
+	if !hasNestedSpec(spec) {
+		fp.Format = c.joinFormat(spec)
+		return fp
+	}
+	fp.Expr = pyparser.BuildDynamicFormatExpr(n.P.Line, value, fp.Conversion, c.specParts(spec))
+	fp.Conversion = 0
+	return fp
+}
+
+// hasNestedSpec 判断格式说明符里是否存在插值字段
+func hasNestedSpec(spec *parser2.JoinedStr) bool {
+	for _, v := range spec.Values {
+		if _, ok := v.(*parser2.FormattedValue); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// specParts 把说明符转成 FString 部件序列（字面段 + 嵌套字段）
+func (c *conv) specParts(spec *parser2.JoinedStr) []pyast.FStringPart {
+	out := make([]pyast.FStringPart, 0, len(spec.Values))
+	for _, v := range spec.Values {
+		switch part := v.(type) {
+		case *parser2.Constant:
+			if s, ok := part.Value.(string); ok {
+				out = append(out, pyast.FStringPart{Literal: s, IsLiteral: true})
 			}
-			if spec, ok := part.FormatSpec.(*parser2.JoinedStr); ok {
-				fp.Format = c.joinFormat(spec)
-			}
-			out.Parts = append(out.Parts, fp)
+		case *parser2.FormattedValue:
+			out = append(out, c.formatField(c.expr(part.Value), part))
 		}
 	}
 	return out
@@ -455,14 +497,7 @@ func (c *conv) joinFormat(n *parser2.JoinedStr) string {
 
 func (c *conv) formattedValue(n *parser2.FormattedValue) pyast.Expr {
 	out := &pyast.FString{Pos: pos(n.P)}
-	fp := pyast.FStringPart{Expr: c.expr(n.Value)}
-	if n.Conversion > 0 {
-		fp.Conversion = byte(n.Conversion)
-	}
-	if spec, ok := n.FormatSpec.(*parser2.JoinedStr); ok {
-		fp.Format = c.joinFormat(spec)
-	}
-	out.Parts = append(out.Parts, fp)
+	out.Parts = append(out.Parts, c.formatField(c.expr(n.Value), n))
 	return out
 }
 

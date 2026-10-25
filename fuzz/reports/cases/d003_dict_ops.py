@@ -1,0 +1,11 @@
+d = {'a': 0, 'b': 10, 'c': 20, 'd': 30, 'e': 40}
+print(sorted(d.items()))
+print(sorted(d.keys()), sorted(d.values()))
+print(d.get('zz'), d.get('zz', -1))
+d2 = dict(d); d2.update({'n': 1}); print(sorted(d2.items()))
+print(dict.fromkeys(['p', 'q'], 0))
+print({v: k2 for k2, v in d.items()})
+d3 = dict(d); print(d3.setdefault('z', 7), d3.setdefault('a', 9), sorted(d3.items()))
+d4 = dict(d); d4.pop('a'); print(sorted(d4.items()))
+print('a' in d, 'zz' in d)
+print(len(d), list(d)[0])

@@ -358,6 +358,10 @@ func (ip *Interp) loadModuleFromFile(name, path string) *object.Module {
 	prevFile := ip.MainFile
 	ip.MainFile = path
 	defer func() { ip.MainFile = prevFile }()
+	// PEP 563：本模块的 __future__ 声明只影响本模块体
+	prevFuture := ip.FutureAnnotations
+	ip.FutureAnnotations = moduleHasFutureAnnotations(m.Body)
+	defer func() { ip.FutureAnnotations = prevFuture }()
 	for _, st := range m.Body {
 		ip.execStmt(st, env)
 	}

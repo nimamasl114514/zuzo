@@ -177,6 +177,15 @@ func modIO(ip *Interp) *object.Module {
 	m.Dict["RawIOBase"] = ioBase
 	m.Dict["BufferedIOBase"] = ioBase
 	m.Dict["TextIOBase"] = ioBase
+	// 具体缓冲流类型：importlib/resources/abc.py:163 用 io.BufferedReader 做 isinstance/注解；
+	// io.pyi 里的这些名字被大量库当类型引用，无法 import 就整链断掉。
+	buffered := func(name string) *object.TypeObj {
+		return &object.TypeObj{Name: name, Bases: []*object.TypeObj{ioBase}, Dict: map[string]object.Object{}}
+	}
+	m.Dict["BufferedReader"] = buffered("BufferedReader")
+	m.Dict["BufferedWriter"] = buffered("BufferedWriter")
+	m.Dict["BufferedRandom"] = buffered("BufferedRandom")
+	m.Dict["BufferedRWPair"] = buffered("BufferedRWPair")
 
 	m.Dict["BytesIO"] = newBytesIOType(ip, "BytesIO")
 	m.Dict["StringIO"] = newStringIOType(ip, "StringIO")

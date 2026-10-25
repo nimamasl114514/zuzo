@@ -349,6 +349,28 @@ func (ip *Interp) opAdd(a, b object.Object) object.Object {
 			n = append(n, y.V...)
 			return &object.Bytes{V: n}
 		}
+		if y, ok2 := b.(*object.ByteArray); ok2 {
+			n := make([]byte, 0, len(x.V)+len(y.V))
+			n = append(n, x.V...)
+			n = append(n, y.V...)
+			return &object.ByteArray{V: n}
+		}
+	}
+	// bytearray 拼接：urllib3/util/url.py 的 _encode_invalid_chars 用
+	// `encoded_component = bytearray()` 再 `+= byte`（bytes），缺这条整链 TypeError。
+	if x, ok := a.(*object.ByteArray); ok {
+		switch y := b.(type) {
+		case *object.ByteArray:
+			n := make([]byte, 0, len(x.V)+len(y.V))
+			n = append(n, x.V...)
+			n = append(n, y.V...)
+			return &object.ByteArray{V: n}
+		case *object.Bytes:
+			n := make([]byte, 0, len(x.V)+len(y.V))
+			n = append(n, x.V...)
+			n = append(n, y.V...)
+			return &object.ByteArray{V: n}
+		}
 	}
 	if x, ok := a.(*object.List); ok {
 		if y, ok2 := b.(*object.List); ok2 {

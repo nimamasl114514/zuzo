@@ -666,113 +666,15 @@ func (p *Parser) parseFString(tok token.Token) ast.Expr {
 				i += 2
 				continue
 			}
-			// 找匹配的 }
-			depth := 1
-			j := i + 1
-			var inner strings.Builder
-			for j < len(src) && depth > 0 {
-				ch := src[j]
-				if ch == '{' {
-					depth++
-				} else if ch == '}' {
-					depth--
-					if depth == 0 {
-						break
-					}
-				}
-				inner.WriteRune(ch)
-				j++
-			}
-			if j >= len(src) {
+			// 找匹配的 }（跳过字段内嵌套的字符串与转义，PEP 701）
+			j := fstringFieldEnd(src, i+1)
+			if j < 0 {
 				lit.WriteString(string(src[i:]))
 				break
 			}
 			flush()
-			content := inner.String()
-			exprSrc := content
-			format := ""
-			var conv byte
-			// 拆分 !conv 与 :format（跳过嵌套结构）
-			depthB, depthC, depthP := 0, 0, 0
-			inStr := rune(0)
-			cut := len(content)
-			for k, r := range []rune(content) {
-				if inStr != 0 {
-					if r == inStr {
-						inStr = 0
-					}
-					continue
-				}
-				switch r {
-				case '\'', '"':
-					inStr = r
-				case '(', '[', '{':
-					depthP++
-				case ')', ']', '}':
-					depthP--
-				case ':':
-					if depthB == 0 && depthC == 0 && depthP == 0 {
-						cut = k
-					}
-				case '!':
-					if depthB == 0 && depthC == 0 && depthP == 0 && cut == len(content) {
-						depthB++
-					}
-				}
-				_ = depthC
-				if cut != len(content) {
-					break
-				}
-			}
-			// 重新精确拆分
-			rs := []rune(content)
-			lvl := 0
-			inS := rune(0)
-			splitAt := -1
-			specAt := -1
-			for k := 0; k < len(rs); k++ {
-				r := rs[k]
-				if inS != 0 {
-					if r == inS {
-						inS = 0
-					}
-					continue
-				}
-				switch r {
-				case '\'', '"':
-					inS = r
-				case '(', '[', '{':
-					lvl++
-				case ')', ']', '}':
-					lvl--
-				case '!':
-					if lvl == 0 && splitAt < 0 {
-						splitAt = k
-					}
-				case ':':
-					if lvl == 0 && specAt < 0 {
-						specAt = k
-					}
-				}
-			}
-			exprEnd := len(rs)
-			if splitAt >= 0 {
-				exprEnd = splitAt
-			} else if specAt >= 0 {
-				exprEnd = specAt
-			}
-			exprSrc = strings.TrimSpace(string(rs[:exprEnd]))
-			rest := rs[exprEnd:]
-			if splitAt >= 0 {
-				// !r 或 !s 或 !a
-				if len(rest) >= 2 {
-					conv = byte(rest[1])
-					rest = rest[2:]
-				}
-			}
-			if len(rest) > 0 && rest[0] == ':' {
-				format = string(rest[1:])
-			}
+			content := string(src[i+1 : j])
+			exprSrc, conv, format, hasSpec := fstringSplitField(content)
 			// 自文档 f-string：{expr=} / {expr=!r} / {expr=:spec}
 			// CPython 语义：输出「源码原文=」再接值；未指定转换/格式时默认用 repr
 			debugText := ""
@@ -782,7 +684,7 @@ func (p *Parser) parseFString(tok token.Token) ast.Expr {
 				!strings.HasSuffix(exprSrc, ":=") {
 				debugText = exprSrc
 				exprSrc = strings.TrimSpace(strings.TrimSuffix(exprSrc, "="))
-				if conv == 0 && format == "" {
+				if conv == 0 && !hasSpec {
 					conv = 'r'
 				}
 			}
@@ -795,7 +697,13 @@ func (p *Parser) parseFString(tok token.Token) ast.Expr {
 			if debugText != "" {
 				parts = append(parts, ast.FStringPart{Literal: debugText, IsLiteral: true})
 			}
-			parts = append(parts, ast.FStringPart{Expr: sub, Format: format, Conversion: conv})
+			if hasSpec && strings.ContainsRune(format, '{') {
+				// PEP 701 嵌套字段说明符（f"{v:{fill}{width}}"）：说明符本身需在运行时求值，
+				// 而 ast.FStringPart.Format 是静态字串，故改写为 format(v, 说明符) 调用。
+				parts = append(parts, ast.FStringPart{Expr: buildDynamicFormat(sub, conv, format, tok.Line)})
+			} else {
+				parts = append(parts, ast.FStringPart{Expr: sub, Format: format, Conversion: conv})
+			}
 			i = j + 1
 			continue
 		}
@@ -814,4 +722,169 @@ func (p *Parser) parseFString(tok token.Token) ast.Expr {
 	}
 	flush()
 	return &ast.FString{Pos: ast.Pos{L: tok.Line}, Parts: parts}
+}
+
+// ==================== f-string 字段扫描（PEP 701） ====================
+
+// fstringSkipString 跳过 src[i]（引号起点）处的字符串字面量，返回其后一个下标。
+// 支持三引号与反斜杠转义；用于让字段边界/分隔符识别不被字段内的字符串干扰。
+func fstringSkipString(src []rune, i int) int {
+	q := src[i]
+	triple := i+2 < len(src) && src[i+1] == q && src[i+2] == q
+	i++
+	if triple {
+		i += 2
+	}
+	for i < len(src) {
+		c := src[i]
+		if c == '\\' {
+			i += 2
+			continue
+		}
+		if triple {
+			if c == q && i+2 < len(src) && src[i+1] == q && src[i+2] == q {
+				return i + 3
+			}
+		} else if c == q {
+			return i + 1
+		}
+		i++
+	}
+	return len(src)
+}
+
+// fstringFieldEnd 从 src[start]（'{' 之后）开始找插值字段的结束 '}'，返回其下标。
+// 跳过字段内嵌套字符串、转义与嵌套大括号；找不到返回 -1。
+func fstringFieldEnd(src []rune, start int) int {
+	depth := 1
+	for i := start; i < len(src); i++ {
+		switch src[i] {
+		case '\'', '"':
+			i = fstringSkipString(src, i) - 1
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// fstringSplitField 把字段内容拆成「表达式原文 / 转换符 / 格式说明符」。
+// 只在顶层（括号深度 0、不在字符串内）识别 !conv 与 :spec；!= 不算转换符。
+func fstringSplitField(content string) (exprSrc string, conv byte, spec string, hasSpec bool) {
+	rs := []rune(content)
+	lvl := 0
+	splitAt, specAt := -1, -1
+	for k := 0; k < len(rs); k++ {
+		switch r := rs[k]; r {
+		case '\'', '"':
+			k = fstringSkipString(rs, k) - 1
+		case '(', '[', '{':
+			lvl++
+		case ')', ']', '}':
+			lvl--
+		case '!':
+			if lvl == 0 && splitAt < 0 && (k+1 >= len(rs) || rs[k+1] != '=') {
+				splitAt = k
+			}
+		case ':':
+			if lvl == 0 && specAt < 0 {
+				specAt = k
+			}
+		}
+	}
+	exprEnd := len(rs)
+	if splitAt >= 0 {
+		exprEnd = splitAt
+	} else if specAt >= 0 {
+		exprEnd = specAt
+	}
+	exprSrc = strings.TrimSpace(string(rs[:exprEnd]))
+	rest := exprEnd
+	if splitAt >= 0 {
+		if splitAt+1 < len(rs) {
+			conv = byte(rs[splitAt+1])
+		}
+		rest = splitAt + 2
+	}
+	if rest < len(rs) && rs[rest] == ':' {
+		spec = string(rs[rest+1:])
+		hasSpec = true
+	}
+	return exprSrc, conv, spec, hasSpec
+}
+
+// fstringSpecParts 把格式说明符文本拆成部件：字面段 + 嵌套插值字段。
+// 嵌套字段按 CPython 语义先求值再 str() 展开（可由运行时 evalFString 直接完成）。
+func fstringSpecParts(spec string, line int) []ast.FStringPart {
+	src := []rune(spec)
+	var parts []ast.FStringPart
+	var lit strings.Builder
+	flush := func() {
+		if lit.Len() > 0 {
+			parts = append(parts, ast.FStringPart{Literal: lit.String(), IsLiteral: true})
+			lit.Reset()
+		}
+	}
+	for i := 0; i < len(src); {
+		c := src[i]
+		if c == '{' {
+			if i+1 < len(src) && src[i+1] == '{' {
+				lit.WriteRune('{')
+				i += 2
+				continue
+			}
+			j := fstringFieldEnd(src, i+1)
+			if j < 0 {
+				lit.WriteString(string(src[i:]))
+				break
+			}
+			flush()
+			exprSrc, conv, sub, hasSpec := fstringSplitField(string(src[i+1 : j]))
+			subExpr, _ := ParseExpr(exprSrc)
+			if hasSpec && strings.ContainsRune(sub, '{') {
+				parts = append(parts, ast.FStringPart{Expr: buildDynamicFormat(subExpr, conv, sub, line)})
+			} else {
+				parts = append(parts, ast.FStringPart{Expr: subExpr, Format: sub, Conversion: conv})
+			}
+			i = j + 1
+			continue
+		}
+		if c == '}' && i+1 < len(src) && src[i+1] == '}' {
+			lit.WriteRune('}')
+			i += 2
+			continue
+		}
+		lit.WriteRune(c)
+		i++
+	}
+	flush()
+	return parts
+}
+
+// buildDynamicFormat 把「值 + 动态格式说明符」组装成 format(值, 说明符) 调用。
+//
+// ast.FStringPart.Format 是静态字串，承载不了 PEP 701 的嵌套字段说明符（如
+// f"{v:{fill}{width}}"）；转成内建 format() 调用即可复用既有运行时，无需改 runtime。
+// 转换符 !r/!s/!a 先于说明符生效，故包一层只带 Conversion 的 FString。
+func buildDynamicFormat(value ast.Expr, conv byte, spec string, line int) ast.Expr {
+	return BuildDynamicFormatExpr(line, value, conv, fstringSpecParts(spec, line))
+}
+
+// BuildDynamicFormatExpr 供 py/pyparse（gopapy 轨）复用同一套动态说明符改写规则。
+func BuildDynamicFormatExpr(line int, value ast.Expr, conv byte, specParts []ast.FStringPart) ast.Expr {
+	pos := ast.Pos{L: line}
+	inner := value
+	if conv != 0 {
+		inner = &ast.FString{Pos: pos, Parts: []ast.FStringPart{{Expr: value, Conversion: conv}}}
+	}
+	return &ast.Call{
+		Pos:  pos,
+		Func: &ast.Name{Pos: pos, Id: "format"},
+		Args: []ast.Expr{inner, &ast.FString{Pos: pos, Parts: specParts}},
+	}
 }

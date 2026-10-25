@@ -29,25 +29,25 @@ func lookupEncoding(name string) (encoding.Encoding, bool) {
 	case "", "utf-8", "utf8", "u8", "utf":
 		return nil, true // UTF-8 原生
 	case "ascii", "us-ascii", "646", "ansi-x3.4-1968":
-		return charmap.ISO8859_1, false // ascii 单独特判，见 codecEncode
+		return charmap.ISO8859_1, true // ascii 单独特判，见 codecEncode
 	case "latin-1", "latin1", "iso-8859-1", "iso8859-1", "8859", "cp819":
-		return charmap.ISO8859_1, false
+		return charmap.ISO8859_1, true
 	case "cp1252", "windows-1252":
-		return charmap.Windows1252, false
+		return charmap.Windows1252, true
 	case "gbk", "cp936", "936":
-		return simplifiedchinese.GBK, false
+		return simplifiedchinese.GBK, true
 	case "gb2312", "euc-cn":
-		return simplifiedchinese.HZGB2312, false
+		return simplifiedchinese.HZGB2312, true
 	case "gb18030":
-		return simplifiedchinese.GB18030, false
+		return simplifiedchinese.GB18030, true
 	case "big5", "cp950":
-		return traditionalchinese.Big5, false
+		return traditionalchinese.Big5, true
 	case "utf-16", "utf16":
-		return xtunicode.UTF16(xtunicode.LittleEndian, xtunicode.UseBOM), false
+		return xtunicode.UTF16(xtunicode.LittleEndian, xtunicode.UseBOM), true
 	case "utf-16-le", "utf-16le":
-		return xtunicode.UTF16(xtunicode.LittleEndian, xtunicode.IgnoreBOM), false
+		return xtunicode.UTF16(xtunicode.LittleEndian, xtunicode.IgnoreBOM), true
 	case "utf-16-be", "utf-16be":
-		return xtunicode.UTF16(xtunicode.BigEndian, xtunicode.IgnoreBOM), false
+		return xtunicode.UTF16(xtunicode.BigEndian, xtunicode.IgnoreBOM), true
 	}
 	return nil, false
 }

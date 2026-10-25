@@ -1,0 +1,11 @@
+vals = list(range(8))
+print(sorted(vals, key=lambda x: -x))
+print(list(map(lambda x: x * x, vals)))
+print(list(filter(lambda x: x % 2, vals)))
+print(list(zip(vals, map(str, vals))))
+print(dict(zip(map(str, vals), vals)))
+pairs = [("b", 2), ("a", 1), ("c", 3)]
+print(sorted(pairs))
+print(sorted(pairs, key=lambda p: p[1], reverse=True))
+print(max(vals), min(vals), sum(vals), sorted(vals))
+print(all(v >= 0 for v in vals), any(v > 100 for v in vals))

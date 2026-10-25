@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"fmt"
+	"os"
 	"strings"
 
 	"zuzo/py/ast"
@@ -285,6 +287,113 @@ func (ip *Interp) GetAttr(o object.Object, name string) object.Object {
 				_, ok := v.M[args[1].Str()]
 				return object.GetBool(ok), nil
 			}}
+		// __dict__ 视图补齐 dict 常用方法：requests 的 PreparedRequest 在
+		// `self.__dict__.update(...)` 上失败（'dict' object has no attribute 'update'，第16轮实测）
+		case "update":
+			return &object.Builtin{Name: "update", Fn: func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+				if len(args) > 1 {
+					switch src := args[1].(type) {
+					case *object.Dict:
+						for i, kk := range src.Keys {
+							if i < len(src.Vals) {
+								v.M[kk.Str()] = src.Vals[i]
+							}
+						}
+					case *object.DictProxy:
+						for kk, vv := range src.M {
+							v.M[kk] = vv
+						}
+					default:
+						for _, pair := range ip.ToSlice(args[1]) {
+							kv := ip.ToSlice(pair)
+							if len(kv) == 2 {
+								v.M[kv[0].Str()] = kv[1]
+							}
+						}
+					}
+				}
+				for kk, vv := range kw {
+					v.M[kk] = vv
+				}
+				return object.None, nil
+			}}
+		case "setdefault":
+			return &object.Builtin{Name: "setdefault", Fn: func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+				if len(args) < 2 {
+					return object.None, nil
+				}
+				key := args[1].Str()
+				if val, ok := v.M[key]; ok {
+					return val, nil
+				}
+				var def object.Object = object.None
+				if len(args) > 2 {
+					def = args[2]
+				}
+				v.M[key] = def
+				return def, nil
+			}}
+		case "pop":
+			return &object.Builtin{Name: "pop", Fn: func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+				if len(args) < 2 {
+					return object.None, nil
+				}
+				key := args[1].Str()
+				if val, ok := v.M[key]; ok {
+					delete(v.M, key)
+					return val, nil
+				}
+				if len(args) > 2 {
+					return args[2], nil
+				}
+				ip.KeyErr(args[1])
+				return object.None, nil
+			}}
+		case "clear":
+			return &object.Builtin{Name: "clear", Fn: func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+				for kk := range v.M {
+					delete(v.M, kk)
+				}
+				return object.None, nil
+			}}
+		case "copy":
+			return &object.Builtin{Name: "copy", Fn: func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+				d := &object.Dict{}
+				for kk, vv := range v.M {
+					d.Set(&object.Str{V: kk}, vv)
+				}
+				return d, nil
+			}}
+		case "__len__":
+			return &object.Builtin{Name: "__len__", Fn: func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+				return &object.Int{V: int64(len(v.M))}, nil
+			}}
+		case "__iter__":
+			return &object.Builtin{Name: "__iter__", Fn: func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+				var out []object.Object
+				for kk := range v.M {
+					out = append(out, &object.Str{V: kk})
+				}
+				return &object.Iterator{Items: out}, nil
+			}}
+		case "__getitem__":
+			return &object.Builtin{Name: "__getitem__", Fn: func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+				if len(args) < 2 {
+					return object.None, nil
+				}
+				if val, ok := v.M[args[1].Str()]; ok {
+					return val, nil
+				}
+				ip.KeyErr(args[1])
+				return object.None, nil
+			}}
+		case "__setitem__":
+			return &object.Builtin{Name: "__setitem__", Fn: func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
+				if len(args) >= 3 {
+					v.M[args[1].Str()] = args[2]
+				}
+				return object.None, nil
+			}}
 		}
 		ip.AttrErr(o, name)
 	case *object.Function:
@@ -399,7 +508,15 @@ func (ip *Interp) GetAttr(o object.Object, name string) object.Object {
 		}
 		var mro []*object.TypeObj
 		if v.Self != nil {
-			if t := v.Self.Type(); t != nil {
+			if _, isType := v.Self.(*object.TypeObj); isType {
+				// 元类里的 super()（如 ABCMeta.__new__ 中的 super().__new__）：
+				// 查找链必须是元类自身的 MRO（ABCMeta → type → object），
+				// 而不是「类对象的类型」MRO（type → object，里面没有 ABCMeta，
+				// start 停在 0 又命中自己 → 无限递归，第16轮实测）。
+				if v.Class != nil {
+					mro = v.Class.MRO()
+				}
+			} else if t := v.Self.Type(); t != nil {
 				mro = t.MRO()
 			}
 		}
@@ -413,8 +530,22 @@ func (ip *Interp) GetAttr(o object.Object, name string) object.Object {
 				break
 			}
 		}
+		if os.Getenv("ZUZO_DEBUG_SUPER") != "" {
+			fmt.Fprintf(os.Stderr, "[super] name=%s self=%T class=", name, v.Self)
+			if v.Class != nil {
+				fmt.Fprintf(os.Stderr, "%s", v.Class.Name)
+			}
+			fmt.Fprintf(os.Stderr, " start=%d mro=", start)
+			for _, c := range mro {
+				fmt.Fprintf(os.Stderr, "%s ", c.Name)
+			}
+			fmt.Fprintln(os.Stderr)
+		}
 		for i := start; i < len(mro); i++ {
 			if m, ok := mro[i].Dict[name]; ok {
+				if os.Getenv("ZUZO_DEBUG_SUPER") != "" {
+					fmt.Fprintf(os.Stderr, "[super-hit] %s -> %T on %s (i=%d)\n", name, m, mro[i].Name, i)
+				}
 				return ip.bindClassAttr(mro[i], v.Self, m)
 			}
 		}
@@ -524,7 +655,7 @@ func (ip *Interp) SetAttr(o object.Object, name string, v object.Object) {
 		inst.Dict[name] = v
 		return
 	}
-	ip.raise(ip.excType("AttributeError"), "'%s' object has no attribute '%s'", object.TypeName(o), name)
+	ip.raise(ip.excType("AttributeError"), "'%s' object has no attribute '%s' [go:%T]", object.TypeName(o), name, o)
 }
 
 // ==================== 下标 ====================

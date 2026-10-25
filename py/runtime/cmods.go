@@ -189,6 +189,16 @@ func modUnicodeData(ip *Interp) *object.Module {
 		return object.None, nil
 	})
 
+	// ucd_3_2_0：stringprep.py:8 的模块级硬依赖，且第 10 行断言
+	// `ucd_3_2_0.unidata_version == '3.2.0'`。用独立代理模块：转发表全部函数，
+	// 只把版本号改回 3.2.0（stringprep 只用到 category/combining 等，代理足够）。
+	ucd := &object.Module{Name: "ucd_3_2_0", Dict: map[string]object.Object{}}
+	for kk, vv := range m.Dict {
+		ucd.Dict[kk] = vv
+	}
+	ucd.Dict["unidata_version"] = &object.Str{V: "3.2.0"}
+	m.Dict["ucd_3_2_0"] = ucd
+
 	return m
 }
 

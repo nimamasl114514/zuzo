@@ -200,6 +200,11 @@ func (t *TypeObj) Lookup(name string) (Object, bool) {
 
 // IsSubclass 判断是否为 other 的子类
 func (t *TypeObj) IsSubclass(other *TypeObj) bool {
+	// bool 是 int 的子类（CPython：Trueisinstance int == True）。
+	// MRO 不动（保方法解析不变），只修正继承判定这个观测面。
+	if t == boolType && other == intType {
+		return true
+	}
 	for _, c := range t.MRO() {
 		if c == other {
 			return true

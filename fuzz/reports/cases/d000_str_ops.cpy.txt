@@ -1,0 +1,10 @@
+False
+1
+abcabc
+.....abcabc
+***abcabc**
+True
+bcab abc acb cbacba
+ ab
+6 abcabcabcabc
+True True

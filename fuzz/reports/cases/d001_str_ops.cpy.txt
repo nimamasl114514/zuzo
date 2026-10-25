@@ -1,0 +1,10 @@
+***abcabc**
+abcabc
+ABCABC
+('abcabc', '', '')
+Abcabc
+4
+bcab abc acb cbacba
+ ab
+6 abcabcabcabc
+True True

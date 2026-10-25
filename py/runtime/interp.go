@@ -32,12 +32,14 @@ type Interp struct {
 	Depth       int
 	MaxDepth    int
 	// CurLine 当前正在执行的语句行号（只有错误回溯用，语句级更新，热路径开销可忽略）
-	CurLine    int
-	Frames     []string
-	genStack   []*genCtx
-	currentEnv *object.Env
-	kwOrder    []string // 最近一次调用的关键字参数顺序
-	ExcTypes   map[string]*object.TypeObj
+	CurLine int
+	// FutureAnnotations 当前模块是否声明 from __future__ import annotations（PEP 563）
+	FutureAnnotations bool
+	Frames            []string
+	genStack          []*genCtx
+	currentEnv        *object.Env
+	kwOrder           []string // 最近一次调用的关键字参数顺序
+	ExcTypes          map[string]*object.TypeObj
 	// numCache 数字字面量解析结果缓存（key = AST 节点指针）。
 	// 循环条件/常量在热路径上每轮都会求值，重复 ParseInt 是主要开销之一；
 	// 用 sync.Map 因为 threading/asyncio 模块会在 goroutine 中并发求值。
@@ -168,7 +170,7 @@ func (ip *Interp) KeyErr(key object.Object) {
 
 // AttrErr 属性错误
 func (ip *Interp) AttrErr(o object.Object, attr string) {
-	ip.raise(ip.excType("AttributeError"), "'%s' object has no attribute '%s'", object.TypeName(o), attr)
+	ip.raise(ip.excType("AttributeError"), "'%s' object has no attribute '%s' [go:%T]", object.TypeName(o), attr, o)
 }
 
 // RuntimeErr 运行时错误
@@ -215,6 +217,10 @@ func (ip *Interp) protect(fn func()) (pe *PyError) {
 
 // ExecModule 执行模块
 func (ip *Interp) ExecModule(m *ast.Module, env *object.Env) {
+	// PEP 563：模块级 __future__ 声明影响该模块全部注解的求值时机
+	prevFuture := ip.FutureAnnotations
+	ip.FutureAnnotations = moduleHasFutureAnnotations(m.Body)
+	defer func() { ip.FutureAnnotations = prevFuture }()
 	for _, st := range m.Body {
 		ip.execStmt(st, env)
 	}
@@ -350,11 +356,18 @@ func (ip *Interp) execStmtInner(s ast.Stmt, env *object.Env) {
 // bindName 按作用域规则绑定名字
 func (ip *Interp) bindName(name string, v object.Object, env *object.Env) {
 	if env.GlobalNames[name] {
-		ip.Globals.Set(name, v)
+		// global 指的是「当前模块的全局」，不是主脚本的全局：
+		// import 进来的模块有自己的根 env（Parent == Builtins）。
+		// 旧实现硬写 ip.Globals，导致 certifi/core.py 的
+		// `global _CACERT_CTX; _CACERT_CTX = as_file(...)` 写到了主脚本全局，
+		// 函数内再读仍是 None → 'NoneType' object has no attribute '__enter__'
+		// （第16轮 requests 链实测）。
+		ip.moduleRootEnv(env).Set(name, v)
 		return
 	}
 	if env.NonlocalNames[name] {
-		for cur := env.Parent; cur != nil && cur != ip.Globals; cur = cur.Parent {
+		root := ip.moduleRootEnv(env)
+		for cur := env.Parent; cur != nil && cur != root; cur = cur.Parent {
 			if _, ok := cur.Vars[name]; ok {
 				cur.Vars[name] = v
 				return
@@ -362,6 +375,15 @@ func (ip *Interp) bindName(name string, v object.Object, env *object.Env) {
 		}
 	}
 	env.Set(name, v)
+}
+
+// moduleRootEnv 返回当前执行环境所属模块的根 env（Parent == Builtins 的那一层）。
+func (ip *Interp) moduleRootEnv(env *object.Env) *object.Env {
+	root := env
+	for root.Parent != nil && root.Parent != ip.Builtins {
+		root = root.Parent
+	}
+	return root
 }
 
 func (ip *Interp) execWhile(node *ast.While, env *object.Env) {

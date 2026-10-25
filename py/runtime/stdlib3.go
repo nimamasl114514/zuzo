@@ -512,15 +512,24 @@ func modUrllibParse(ip *Interp) *object.Module {
 	//		// safe 参数默认 "/"（旧实现把 / 硬编码进 safe 且漏了 ~，与 CPython 不一致）。
 	m.Dict["quote"] = bi("quote", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
 		safe := "/"
-		if len(a) > 1 {
+		if len(a) > 1 && a[1] != object.None {
 			safe = a[1].Str()
+		}
+		// requests.utils.requote_uri 用关键字形式 quote(uri, safe=...)；
+		// 旧实现只读位置参数，safe 被丢弃 → 整条 URL 被逐字符编码成 %3A//…
+		// （第16轮实测：InvalidSchema: No connection adapters were found for http%3A//…）。
+		if v, ok := k["safe"]; ok && v != object.None {
+			safe = v.Str()
 		}
 		return &object.Str{V: pyQuoteBytes([]byte(a[0].Str()), safe)}, nil
 	})
 	m.Dict["quote_from_bytes"] = bi("quote_from_bytes", func(a []object.Object, k map[string]object.Object) (object.Object, error) {
 		safe := "/"
-		if len(a) > 1 {
+		if len(a) > 1 && a[1] != object.None {
 			safe = a[1].Str()
+		}
+		if v, ok := k["safe"]; ok && v != object.None {
+			safe = v.Str()
 		}
 		return &object.Str{V: pyQuoteBytes(pyRawBytes(a[0]), safe)}, nil
 	})
