@@ -11,6 +11,7 @@ import (
 
 	"zuzo/ast"
 	"zuzo/lexer"
+	"zuzo/nativecc"
 	"zuzo/parser"
 )
 
@@ -158,6 +159,61 @@ func WriteC(srcPath, outPath string) (*ast.Program, error) {
 		return prog, err
 	}
 	return prog, nil
+}
+
+// BuildExeNative 生成 C 并用内嵌 nativecc 编译器（纯 Go 自研 C 编译器直接出 PE，零外部依赖）。
+// 返回 (C 源码路径, 可执行文件路径, error)。
+func BuildExeNative(srcPath, outExe string) (string, string, error) {
+	work, err := os.MkdirTemp("", "zuzo-ncc-")
+	if err != nil {
+		return "", "", err
+	}
+	if os.Getenv("ZUZO_KEEP_TEMP") == "" {
+		defer os.RemoveAll(work)
+	} else {
+		fmt.Fprintf(os.Stderr, "[cbackend] 中间目录: %s\n", work)
+	}
+	code, _, err := EmitC(srcPath)
+	if err != nil {
+		return "", "", err
+	}
+	cPath := filepath.Join(work, "main.c")
+	rtC := filepath.Join(work, "zuzo_rt.c")
+	rtH := filepath.Join(work, "zuzo_rt.h")
+	for _, w := range []struct {
+		path string
+		data string
+	}{
+		{cPath, code}, {rtC, runtimeC}, {rtH, runtimeH},
+	} {
+		if err := os.WriteFile(w.path, []byte(w.data), 0o644); err != nil {
+			return cPath, "", err
+		}
+	}
+	if outExe == "" {
+		base := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
+		outExe = filepath.Join(filepath.Dir(srcPath), base+exeSuffix())
+	}
+	absOut, err := filepath.Abs(outExe)
+	if err != nil {
+		return cPath, outExe, err
+	}
+	srcs := make([]nativecc.Source, 0, 2)
+	for _, p := range []string{cPath, rtC} {
+		s, err := nativecc.LoadSource(p)
+		if err != nil {
+			return cPath, absOut, err
+		}
+		srcs = append(srcs, s)
+	}
+	buildOut := filepath.Join(work, "a.out"+exeSuffix())
+	if err := nativecc.CompileToExe(srcs, buildOut, nativecc.Options{}); err != nil {
+		return cPath, absOut, fmt.Errorf("内嵌编译器失败: %w", err)
+	}
+	if err := copyFile(buildOut, absOut); err != nil {
+		return cPath, absOut, err
+	}
+	return cPath, absOut, nil
 }
 
 // BuildExe 生成 C 并调用本机编译器产出可执行文件。

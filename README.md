@@ -22,7 +22,8 @@
 - **内置能力**：HTTP 服务端、浏览器自动化（chromedp）、CFFI / WASM FFI（wazero）、并发原语、正则、编码、集合库
 - **字符串标准库**：内建 `文本` 命名空间（110 成员：大小写 / 裁剪 / 查找替换 / 分割 / 对齐 / 判定 / 子串 / 中文友好 / UTF-8・编码・正则）+ `libs/strings` 高层封装（统计 / 表格 / 命名法 / 模板 / 千分位）
 - **工具链**：`zpm` 包管理器、类型检查 `--check`、拓扑指纹分析 `--analyze`、影子模式 `--shadow`、CPU 采样 `ZUZO_CPUPROFILE`
-- **C 后端（第21轮新增）**：`--emit-c` 直接生成 C 源码、`--emit-exe` 调本机 gcc/clang/zig cc 产出原生 exe；语义与解释器逐字节对拍（`run_tests_c.sh` 8/8）
+- **C 后端**：`--emit-c` 直接生成 C 源码、`--emit-exe` 产出原生 exe；外部 gcc 与内嵌 nativecc 双后端均与解释器逐字节对拍（17/17）
+- **内嵌 nativecc**：纯 Go 自研 C 编译器，直接输出 Windows x64 PE；`--cc=native` 零外部 C 编译器依赖，单例编译中位耗时 68.645 ms
 
 ## 快速开始
 
@@ -45,7 +46,9 @@ go build -o zuzo ./
 
 # C 后端：编译为 C / 编译为 exe
 ./zuzo --emit-c 文件.hy            # 产出 文件.c + zuzo_rt.c/.h
-./zuzo --emit-exe 文件.hy          # 产出 文件.exe（自动调 gcc）
+./zuzo --emit-exe 文件.hy          # 产出 文件.exe（默认 auto）
+./zuzo --emit-exe 文件.hy --cc=native  # 内嵌编译器，零外部 C 编译器依赖
+./zuzo --emit-exe 文件.hy --cc=gcc     # 外部 gcc/clang 对照
 ```
 
 > 本机 gcc 不在 PATH 时用 zig 的 clang 顶替：
@@ -99,6 +102,7 @@ print(总)
 | `object/` | 值表示（Smi 标记、Context 扁平帧、arena） |
 | `py/` | 内嵌 Python：`parser/ runtime/ object/ pyparse/`（gopapy 适配） |
 | `mix/` | 混合语言执行器（切块 / 类型桥 / 调用桥 / 块级 SAP） |
+| `nativecc/` | 内嵌纯 Go C 编译器（预处理/语法/类型/x86-64/PE） |
 | `zpm/ cmd/zpm/` | 包管理器 |
 | `bench/` | 跨语言基准（C/Go/Java/JS/Python/Rust/zuzo） |
 | `tests/ tests_py/ tests_mix/` | Go 单测 / Python 对拍用例 / 混合 golden |
@@ -109,10 +113,12 @@ print(总)
 ```bash
 ./run_tests.sh        # Python 语义与 CPython 逐字节对拍（33 用例）
 ./run_tests_mix.sh    # 混合语言 golden（15 用例）
-go test ./...         # Go 单测（含原生循环、SAP、混合切块）
+./run_tests_c.sh      # 外部 C 后端对拍（17 用例）
+./run_tests_native.sh # 内嵌 nativecc 对拍（17 用例）
+go test ./...         # Go 单测（含原生循环、SAP、混合切块、nativecc）
 ```
 
-当前状态（2026-10-25 第20轮实测）：`run_tests` **33/33 通过**，且 `--shadow` 影子模式 **33/33 双轨一致**；`run_tests_mix` **15/15**；`go test` 5 个包全绿（`ast` / `evaluator` / `fuzz` / `mix` / `tests`）。
+当前状态（2026-10-31 实测）：`run_tests` **33/33 通过**，且 `--shadow` 影子模式 **33/33 双轨一致**；`run_tests_mix` **15/15**；`run_tests_c` 与 `run_tests_native` 均 **17/17**；Go 单测覆盖 `ast` / `evaluator` / `fuzz` / `mix` / `nativecc` / `tests`。
 
 ## 文档
 
@@ -122,7 +128,7 @@ go test ./...         # Go 单测（含原生循环、SAP、混合切块）
 - [Python 支持](docs/python-support.md)
 - [Python 前端（gopapy 双轨）](docs/python-parser.md)
 - [性能模型与观测](docs/performance.md)
-- [C 后端](docs/c-backend.md)
+- [C 后端](docs/c-backend.md) · [nativecc 内嵌编译器](docs/nativecc.md)
 - [CFFI](docs/cffi.md) · [WASM FFI](docs/wasm-ffi.md)
 - [开发日志](交付-累计.md)
 

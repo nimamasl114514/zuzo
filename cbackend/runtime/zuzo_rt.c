@@ -175,9 +175,9 @@ int z_truthy(ZVal v) {
  * Inspect（打印口径）
  * ══════════════════════════════════════════════════════════ */
 
-typedef struct { char* data; int64_t len; int64_t cap; } ZBuf;
+/* ZBuf 定义已公开到 zuzo_rt.h */
 
-static void buf_init(ZBuf* b) { b->cap = 64; b->len = 0; b->data = (char*)z_alloc(64); b->data[0] = 0; }
+void buf_init(ZBuf* b) { b->cap = 64; b->len = 0; b->data = (char*)z_alloc(64); b->data[0] = 0; }
 
 static void buf_reserve(ZBuf* b, int64_t need) {
     if (b->len + need + 1 <= b->cap) return;
@@ -219,13 +219,13 @@ static void z_format_float(double x, char* out, size_t cap) {
     snprintf(out, cap, "%.17g", x);
 }
 
-static void z_inspect(ZBuf* b, ZVal v);
+void z_inspect(ZBuf* b, ZVal v);
 
 static void z_inspect_str(ZBuf* b, const char* s) {
     buf_puts(b, s);
 }
 
-static void z_inspect(ZBuf* b, ZVal v) {
+void z_inspect(ZBuf* b, ZVal v) {
     char tmp[64];
     switch (v.kind) {
         case ZK_NULL:  buf_puts(b, "空"); break;
@@ -2056,6 +2056,16 @@ ZVal z_sha256(ZVal v) {
  * 格式化（%d %s %f %.Nf %x %X %v %c %% 子集）
  * ══════════════════════════════════════════════════════════ */
 
+static double z_round_half_even(double x, int prec) {
+    double scale = 1.0;
+    for (int i = 0; i < prec; i++) scale *= 10.0;
+    double scaled = x * scale;
+    double lower = floor(scaled);
+    double frac = scaled - lower;
+    if (frac > 0.5 || (frac == 0.5 && fmod(lower, 2.0) != 0.0)) lower += 1.0;
+    return lower / scale;
+}
+
 ZVal z_format(int argc, ZVal* argv) {
     if (argc < 1 || argv[0].kind != ZK_STR) z_die("E226", "格式化() 第一个参数必须是字符串模板");
     ZStr* fmt = argv[0].as.s;
@@ -2093,6 +2103,7 @@ ZVal z_format(int argc, ZVal* argv) {
             case 'f': {
                 double d = (a.kind == ZK_FLOAT) ? a.as.f : ((a.kind == ZK_INT) ? (double)a.as.i : 0.0);
                 if (prec < 0) prec = 6;
+                d = z_round_half_even(d, prec);
                 snprintf(tmp, sizeof(tmp), "%.*f", prec, d);
                 buf_puts(&b, tmp);
                 break;

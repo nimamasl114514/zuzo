@@ -17,7 +17,13 @@ func (g *Gen) genStmt(stmt ast.Statement) error {
 		if err != nil {
 			return err
 		}
-		g.line("return %s;", val)
+		if g.cur == nil {
+			// main 体内：返回值不影响退出码（对齐解释器：handleResult 只映射 ERROR，正常返回 rc=0）；求值保留以不丢副作用
+			g.line("(void)(%s);", val)
+			g.line("return 0;")
+		} else {
+			g.line("return %s;", val)
+		}
 		return nil
 
 	case *ast.ExpressionStatement:

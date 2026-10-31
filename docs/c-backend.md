@@ -22,6 +22,11 @@ ZUZO_CC="C:\path\to\gcc.exe" zuzo --emit-exe 例子.hy
 
 # 保留中间产物（调试代码生成）
 ZUZO_KEEP_TEMP=1 zuzo --emit-exe 例子.hy
+
+# 选择编译链：内嵌 nativecc / 外部 gcc / native 优先自动回退
+zuzo --emit-exe 例子.hy --cc=native
+zuzo --emit-exe 例子.hy --cc=gcc
+zuzo --emit-exe 例子.hy --cc=auto
 ```
 
 编译器探测顺序：`ZUZO_CC` 环境变量 → PATH 里的 `gcc`/`clang`/`cc` → 常见安装路径
@@ -39,8 +44,11 @@ ast.Program
 C 源码（main.c）
     │  + zuzo_rt.c / zuzo_rt.h（运行时，go:embed 内嵌进 zuzo.exe）
     ▼
-gcc -O2 -std=c11  →  exe
+├─ gcc -O2 -std=c11 → exe（权威对照）
+└─ nativecc → x86-64 → PE exe（零外部 C 编译器依赖）
 ```
+
+内嵌编译器的模块、ABI 与验收见 [nativecc](nativecc.md)。
 
 关键点：**前端复用**。C 后端直接吃解释器的 AST，因此语法解析、错误诊断与解释执行完全同源，
 不存在"两套语法两套 bug"的问题。
@@ -136,14 +144,15 @@ zupd_1: ;
 | 并发 / 网络 / HTTP / 浏览器 / WASM / CFFI | ⛔ 明确报错 | 编译期报「依赖 X，C 后端不支持」（`builtin.go:unsupportedBuiltins` 名单） |
 | 堆对象回收 | ⏳ 未做 | 只分配不释放（短进程无感） |
 | 「文本」Unicode 大小写/分类（~83 成员） | ⏳ 未做 | 需码表 |
-| `格式化`（fmt 风格） | ⏳ 未做 | |
+| `格式化`（fmt 风格） | ✅ | `%d %s %f %.Nf %x %X %c %v %%`；浮点半值偶数舍入 |
 
 ## 七、测试
 
 ```bash
-./run_tests_c.sh
+./run_tests_c.sh       # 外部 C 编译器：C-BACKEND PASS=17 FAIL=0
+./run_tests_native.sh  # 内嵌 nativecc：NATIVE-CC PASS=17 FAIL=0
 # 判据：同一份 .hy，解释执行 stdout/rc 与 --emit-exe 产物 stdout/rc 完全一致
-# 当前：C-BACKEND PASS=16 FAIL=0
+# 当前：两个后端均 17/17 通过
 ```
 
 用例集 `tests_c/t01..t17`：打印 / 算术逻辑 / 条件 / while / for / 函数递归 / 数组 / 哈希 / 闭包 / 文本命名空间。
@@ -163,8 +172,8 @@ zupd_1: ;
 
 1. **堆对象不回收**：字符串/数组/哈希本轮只分配不释放（程序退出由 OS 回收）。长驻程序会涨内存，
    第23轮加引用计数。
-2. **闭包未支持**：捕获外部变量的匿名函数会报错，第22轮实现（需要把捕获变量提升到堆环境）。
-3. **函数不能当值传递**：签名按编译期参数个数生成，高阶函数第22轮。
+2. **nativecc 是受控 C 子集**：只覆盖 zuzo 生成 C 与 `zuzo_rt.c`，不承诺任意 ISO C 项目；详见 [nativecc](nativecc.md)。
+3. **闭包已支持**：自由变量分析 + ZBox 堆装箱 + env 结构体，函数可作为值与参数传递。
 4. **哈希查找是线性**：保插入顺序优先；数据量大时第23轮换「开放寻址 + 顺序数组」双结构。
 5. **错误信息格式**：C 侧 `z_die` 输出 `错误 E210: ...` 并 exit(1)，与解释器的诊断渲染格式未做逐字节对齐。
 

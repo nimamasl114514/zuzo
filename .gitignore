@@ -34,6 +34,8 @@ tests_py/_out/
 tests_py/_tmp/
 tests_py/__pycache__/
 tests_mix/_out/
+tests_c/_out/
+tests_c/_nat/
 **/__pycache__/
 
 # ===== 本地临时目录 / profile =====

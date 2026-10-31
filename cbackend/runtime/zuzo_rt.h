@@ -118,6 +118,11 @@ ZVal z_ne(ZVal a, ZVal b);
 void z_print(int argc, ZVal* argv);
 void z_println(void);
 
+/* ── 输出缓冲（Inspect 公开 API）── */
+typedef struct { char* data; int64_t len; int64_t cap; } ZBuf;
+void buf_init(ZBuf* b);
+void z_inspect(ZBuf* b, ZVal v);
+
 /* ── 数组 ─────────────────────────────────────────────── */
 ZVal z_array(void);
 ZVal z_array_with(int64_t n, ZVal* items);
