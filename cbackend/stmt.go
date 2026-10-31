@@ -117,6 +117,7 @@ func (g *Gen) genTryCatch(s *ast.TryCatchStatement) error {
 			if err := g.genStmt(stmt); err != nil {
 				return err
 			}
+			g.emitSafepoint()
 		}
 	}
 	g.popScope()
@@ -201,6 +202,7 @@ func (g *Gen) genBlockStmts(b *ast.BlockStatement) error {
 		if err := g.genStmt(stmt); err != nil {
 			return err
 		}
+		g.emitSafepoint()
 	}
 	return nil
 }
@@ -234,6 +236,7 @@ func (g *Gen) genFor(s *ast.ForStatement) error {
 			if err := g.genStmt(stmt); err != nil {
 				return err
 			}
+			g.emitSafepoint()
 		}
 	}
 	g.updateLabels = g.updateLabels[:len(g.updateLabels)-1]
@@ -286,6 +289,7 @@ func (g *Gen) genForIn(s *ast.ForInStatement) error {
 			if err := g.genStmt(stmt); err != nil {
 				return err
 			}
+			g.emitSafepoint()
 		}
 	}
 	g.updateLabels = g.updateLabels[:len(g.updateLabels)-1]
@@ -328,6 +332,7 @@ func (g *Gen) genForInRange(s *ast.ForInStatement) error {
 			if err := g.genStmt(stmt); err != nil {
 				return err
 			}
+			g.emitSafepoint()
 		}
 	}
 	g.updateLabels = g.updateLabels[:len(g.updateLabels)-1]

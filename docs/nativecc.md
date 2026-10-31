@@ -135,7 +135,14 @@ zuzo 的语义以解释器为准。`zuzo_rt.c` 在 `格式化` 的 `%f` 路径�
 
 保留 `cbackend` 的能力边界：并发、网络、HTTP、浏览器、WASM、CFFI 由 `unsupportedBuiltins` 在编译期给出明确错误，不生成含糊的未定义符号。
 
-nativecc 自身只承诺受控 C 子集，不承诺完整 ISO C、通用 Windows SDK 或任意第三方 C 项目。堆对象回收仍是 zuzo 运行时后续工作，不影响当前 17 例短进程对拍。
+nativecc 自身只承诺受控 C 子集，不承诺完整 ISO C、通用 Windows SDK 或任意第三方 C 项目。
+
+堆对象回收已由 zuzo 运行时在**第27轮**落地（精确根集 mark-sweep，见 [gc](gc.md)），当前 17 例双后端对拍全绿。
+
+### 已知缺陷（第27轮实测记录）
+
+1. **`.rdata` 必须可写**：导入表 IAT 与字符串常量同处 `.rdata`，加载器要在 `LdrProcessInitializationComplete` 阶段写 IAT。若该段标只读，字符串常量多于约 20 个（IAT 被挤到 `0x1000` 页边界附近）时进程启动即崩。已改为 `0xC0000040`，并由 `nativecc/iat_rodata_test.go` 守门。
+2. **外部 CRT 多参调用传参不可靠**：`memset(dst, c, n)` / `memcpy(dst, src, n)` 这类三参外部调用实测会写越界（第26轮修的是自家函数调用的栈参数装载，未覆盖外部函数）。当前规避：zuzo 运行时内不用 `memset`/`memcpy`，改显式循环；待修。
 
 ## 六、排障与观测
 

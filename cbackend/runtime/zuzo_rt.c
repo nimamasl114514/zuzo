@@ -20,6 +20,7 @@
 /* 解释器（Go）输出 LF；C 运行时在 Windows 默认文本模式会把 \n 转成 \r\n。
  * 统一为二进制模式，保证逐字节对拍一致。 */
 void z_rt_init(void) {
+    z_gc_init();
 #ifdef _WIN32
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
@@ -46,6 +47,187 @@ static void* z_realloc(void* p, size_t n) {
         exit(1);
     }
     return q;
+}
+/* ══════════════════════════════════════════════════════════
+ * 内存回收：精确根集 mark-sweep（第27轮）
+ *   - 对象链：z_obj_new 统一挂链，sweep 一次线性扫描；
+ *   - 根集：生成代码在安全点显式传「当前作用域 ZVal 变量地址表 + ZBox* 表 + env」；
+ *   - 触发：仅 z_gc_safepoint()，且 live_bytes >= threshold 时；
+ *   - 阈值：初始 4MB，回收后 max(4MB, 2 * live)。
+ * ══════════════════════════════════════════════════════════ */
+
+static ZObj*  z_gc_head = NULL;
+static size_t z_gc_live_bytes = 0;
+static size_t z_gc_total_bytes = 0;
+static size_t z_gc_threshold = (size_t)4 << 20;
+static long   z_gc_collections = 0;
+static long   z_gc_objects = 0;
+static int    z_gc_on = 1;
+
+static ZObj** z_mark_stack = NULL;
+static size_t z_mark_cap = 0;
+static size_t z_mark_len = 0;
+
+static void z_mark_push(ZObj* o);
+static void z_mark_val(ZVal v);
+
+static void* z_obj_new(uint32_t kind, size_t size) {
+    ZObj* o = (ZObj*)malloc(size);
+    if (!o) {
+        fputs("zuzo: 内存分配失败\n", stderr);
+        exit(1);
+    }
+    /* 逐字段清零：不依赖 memset（nativecc 对多参外部调用的传参回归验证用） */
+    {
+        unsigned char* p = (unsigned char*)o;
+        size_t k;
+        for (k = 0; k < size; k++) p[k] = 0;
+    }
+    o->next = z_gc_head;
+    o->kind = kind;
+    o->mark = 0;
+    o->size = size;
+    z_gc_head = o;
+    z_gc_live_bytes += size;
+    z_gc_total_bytes += size;
+    z_gc_objects++;
+    return o;
+}
+
+static void z_mark_push(ZObj* o) {
+    if (!o || o->mark) return;
+    o->mark = 1;
+    if (z_mark_len == z_mark_cap) {
+        size_t cap = z_mark_cap ? z_mark_cap * 2 : 256;
+        ZObj** s = (ZObj**)realloc(z_mark_stack, cap * sizeof(ZObj*));
+        if (!s) {
+            fputs("zuzo: 内存分配失败\n", stderr);
+            exit(1);
+        }
+        z_mark_stack = s;
+        z_mark_cap = cap;
+    }
+    z_mark_stack[z_mark_len++] = o;
+}
+
+static void z_mark_val(ZVal v) {
+    switch (v.kind) {
+    case ZK_STR:   z_mark_push((ZObj*)v.as.s); break;
+    case ZK_ARRAY: z_mark_push((ZObj*)v.as.a); break;
+    case ZK_HASH:  z_mark_push((ZObj*)v.as.h); break;
+    case ZK_FUNC:  z_mark_push((ZObj*)v.as.fn); break;
+    default: break;
+    }
+}
+
+static void z_mark_children(ZObj* o) {
+    switch (o->kind) {
+    case ZOK_ARR: {
+        ZArr* a = (ZArr*)o;
+        for (int64_t i = 0; i < a->len; i++) z_mark_val(a->items[i]);
+        break;
+    }
+    case ZOK_HASH: {
+        ZHash* h = (ZHash*)o;
+        for (int64_t i = 0; i < h->len; i++) {
+            z_mark_val(h->entries[i].key);
+            z_mark_val(h->entries[i].val);
+        }
+        break;
+    }
+    case ZOK_BOX:
+        z_mark_val(((ZBox*)o)->v);
+        break;
+    case ZOK_FUNC: {
+        ZFunc* f = (ZFunc*)o;
+        if (f->env) z_mark_push((ZObj*)((ZEnvHead*)f->env - 1));
+        break;
+    }
+    case ZOK_ENV: {
+        ZEnvHead* hd = (ZEnvHead*)o;
+        if (hd->box_off) {
+            char* base = (char*)(hd + 1);
+            for (int i = 0; i < hd->nbox; i++) {
+                ZBox* b = *(ZBox**)(base + hd->box_off[i]);
+                if (b) z_mark_push((ZObj*)b);
+            }
+        }
+        break;
+    }
+    default: break;
+    }
+}
+
+static void z_gc_sweep(void) {
+    ZObj** pp = &z_gc_head;
+    size_t live = 0;
+    while (*pp) {
+        ZObj* o = *pp;
+        if (o->mark) {
+            o->mark = 0;
+            live += o->size;
+            pp = &o->next;
+            continue;
+        }
+        *pp = o->next;
+        if (o->kind == ZOK_STR) free(((ZStr*)o)->data);
+        else if (o->kind == ZOK_ARR) free(((ZArr*)o)->items);
+        else if (o->kind == ZOK_HASH) free(((ZHash*)o)->entries);
+        else if (o->kind == ZOK_ENV) free(((ZEnvHead*)o)->box_off);
+        /* ZOK_FUNC/ZOK_BOX/ZOK_ENV 无附属缓冲 */
+        free(o);
+        z_gc_objects--;
+    }
+    z_gc_live_bytes = live;
+    {
+        size_t floor_bytes = (size_t)4 << 20;
+        size_t next = live * 2;
+        z_gc_threshold = next > floor_bytes ? next : floor_bytes;
+    }
+}
+
+static void z_gc_run(int nvals, ZVal** vals, int nboxes, ZBox** boxes, void* env) {
+    z_mark_len = 0;
+    for (int i = 0; i < nvals; i++) if (vals[i]) z_mark_val(*vals[i]);
+    for (int i = 0; i < nboxes; i++) if (boxes[i]) z_mark_push((ZObj*)boxes[i]);
+    if (env) z_mark_push((ZObj*)((ZEnvHead*)env - 1));
+    z_mark_val(z_error_value);            /* 执行/遇到 传递中的错误值 */
+    while (z_mark_len > 0) {
+        ZObj* o = z_mark_stack[--z_mark_len];
+        z_mark_children(o);
+    }
+    z_gc_sweep();
+    z_gc_collections++;
+}
+
+void z_gc_init(void) {
+    const char* off = getenv("ZUZO_GC");
+    if (off && (off[0] == '0' || off[0] == 'o' || off[0] == 'O')) z_gc_on = 0;
+}
+
+void z_gc_set_enabled(int on) { z_gc_on = on ? 1 : 0; }
+int  z_gc_enabled(void) { return z_gc_on; }
+
+void z_gc_set_threshold(size_t bytes) {
+    z_gc_threshold = bytes ? bytes : ((size_t)4 << 20);
+}
+
+void z_gc_collect_now(void) {
+    /* 无根集的强制回收（仅测试夹具/泄漏判定用；生产路径只走 safepoint） */
+    z_gc_run(0, NULL, 0, NULL, NULL);
+}
+
+void z_gc_stats(size_t* live_bytes, size_t* total_bytes, long* collections, long* objects) {
+    if (live_bytes) *live_bytes = z_gc_live_bytes;
+    if (total_bytes) *total_bytes = z_gc_total_bytes;
+    if (collections) *collections = z_gc_collections;
+    if (objects) *objects = z_gc_objects;
+}
+
+void z_gc_safepoint(int nvals, ZVal** vals, int nboxes, ZBox** boxes, void* env) {
+    if (!z_gc_on) return;
+    if (z_gc_live_bytes < z_gc_threshold) return;
+    z_gc_run(nvals, vals, nboxes, boxes, env);
 }
 
 /* UTF-8 码点计数（长度() 对字符串的口径：rune 数，不是字节数） */
@@ -119,7 +301,7 @@ ZVal z_bool(int x) {
 }
 
 ZVal z_str_take(char* heap, int64_t n) {
-    ZStr* s = (ZStr*)z_alloc(sizeof(ZStr));
+    ZStr* s = (ZStr*)z_obj_new(ZOK_STR, sizeof(ZStr));
     s->len = n;
     s->data = heap;
     ZVal v; v.kind = ZK_STR; v.as.s = s; return v;
@@ -441,7 +623,7 @@ ZVal z_ne(ZVal a, ZVal b) {
  * ══════════════════════════════════════════════════════════ */
 
 static ZArr* z_arr_new(int64_t cap) {
-    ZArr* a = (ZArr*)z_alloc(sizeof(ZArr));
+    ZArr* a = (ZArr*)z_obj_new(ZOK_ARR, sizeof(ZArr));
     a->len = 0;
     a->cap = cap > 0 ? cap : 4;
     a->items = (ZVal*)z_alloc(sizeof(ZVal) * (size_t)a->cap);
@@ -473,7 +655,7 @@ void z_array_push(ZVal arr, ZVal x) {
  * ══════════════════════════════════════════════════════════ */
 
 ZVal z_hash(void) {
-    ZHash* h = (ZHash*)z_alloc(sizeof(ZHash));
+    ZHash* h = (ZHash*)z_obj_new(ZOK_HASH, sizeof(ZHash));
     h->len = 0;
     h->cap = 4;
     h->entries = (ZHashEntry*)z_alloc(sizeof(ZHashEntry) * (size_t)h->cap);
@@ -599,18 +781,32 @@ ZVal z_join(ZVal arr, ZVal sep) {
  * ══════════════════════════════════════════════════════════ */
 
 ZBox* z_box(ZVal v) {
-    ZBox* b = (ZBox*)z_alloc(sizeof(ZBox));
+    ZBox* b = (ZBox*)z_obj_new(ZOK_BOX, sizeof(ZBox));
     b->v = v;
     return b;
 }
 
 void* z_new_env(size_t n) {
+    return z_new_env_ex(0, NULL, n);
+}
+
+void* z_new_env_ex(int nbox, const size_t* offs, size_t n) {
+    ZEnvHead* hd;
     if (n < sizeof(void*)) n = sizeof(void*);
-    return z_alloc(n);
+    hd = (ZEnvHead*)z_obj_new(ZOK_ENV, sizeof(ZEnvHead) + n);
+    hd->nbox = nbox > 0 ? nbox : 0;
+    hd->box_off = NULL;
+    if (hd->nbox > 0 && offs) {
+        int i;
+        hd->box_off = (size_t*)z_alloc(sizeof(size_t) * (size_t)hd->nbox);
+        /* 不用 memcpy：nativecc 对外部多参调用（memset/memcpy）的传参尚不可靠 */
+        for (i = 0; i < hd->nbox; i++) hd->box_off[i] = offs[i];
+    }
+    return (void*)(hd + 1);
 }
 
 ZVal z_closure(ZFnPtr fn, void* env, const char* name) {
-    ZFunc* f = (ZFunc*)z_alloc(sizeof(ZFunc));
+    ZFunc* f = (ZFunc*)z_obj_new(ZOK_FUNC, sizeof(ZFunc));
     f->fn = fn;
     f->env = env;
     f->name = name;

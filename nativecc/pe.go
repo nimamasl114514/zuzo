@@ -266,7 +266,9 @@ func WritePE(c *Compiled, outPath string) error {
 		putU32(s[36:], chars)
 	}
 	writeSection(0, ".text", textSize, rvaText, textRaw, rawText, 0x60000020)
-	writeSection(1, ".rdata", len(rdata), rvaRData, rdataRaw, rawRData, 0x40000040)
+	// .rdata 同时承载导入表 IAT：加载器要在 LdrProcessInitializationComplete 阶段写 IAT，
+// 段必须可写；否则在字符串/导入表跨过 0x1000 边界后写 IAT 会访问只读页崩溃。
+	writeSection(1, ".rdata", len(rdata), rvaRData, rdataRaw, rawRData, 0xC0000040)
 	writeSection(2, ".data", len(dataSeg), rvaData, dataRaw, rawData, 0xC0000040)
 
 	// ── 8. 写出 ──

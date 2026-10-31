@@ -36,6 +36,31 @@ typedef struct ZFunc  ZFunc;
 
 typedef ZVal (*ZFnPtr)(int argc, ZVal* argv, void* env);
 
+typedef enum {
+    ZOK_STR = 1,
+    ZOK_ARR,
+    ZOK_HASH,
+    ZOK_FUNC,
+    ZOK_BOX,
+    ZOK_ENV
+} ZObjKind;
+
+typedef struct ZObj {
+    struct ZObj* next; /* 全局对象链 */
+    uint32_t     kind; /* ZObjKind */
+    uint32_t     mark; /* 标记位 */
+    size_t       size; /* 申请字节数 */
+} ZObj;
+
+/* env 头：偏移表在创建时拷贝一份，随 env 对象一起释放。
+ * 不用全局静态 ZEnvDesc，因为内嵌 nativecc 的全局初始化器不支持 sizeof/数组地址常量。 */
+typedef struct ZEnvHead {
+    ZObj    gc;
+    int     nbox;
+    size_t* box_off;
+} ZEnvHead;
+
+
 /* 值：16 字节（kind + union） */
 struct ZVal {
     ZKind kind;
@@ -51,11 +76,13 @@ struct ZVal {
 };
 
 struct ZStr {
+    ZObj    gc;
     int64_t len;   /* 字节数 */
     char*   data;  /* UTF-8，NUL 结尾 */
 };
 
 struct ZArr {
+    ZObj    gc;
     int64_t len;
     int64_t cap;
     ZVal*   items;
@@ -68,12 +95,14 @@ typedef struct ZHashEntry {
 } ZHashEntry;
 
 struct ZHash {
+    ZObj        gc;
     int64_t     len;
     int64_t     cap;
     ZHashEntry* entries;
 };
 
 struct ZFunc {
+    ZObj        gc;
     ZFnPtr      fn;
     void*       env;
     const char* name;
@@ -81,6 +110,7 @@ struct ZFunc {
 
 /* 闭包捕获的堆变量（共享可变状态） */
 typedef struct ZBox {
+    ZObj gc;
     ZVal v;
 } ZBox;
 
@@ -148,12 +178,28 @@ ZVal z_contains(ZVal container, ZVal v);
 /* ── 闭包与函数值 ─────────────────────────────── */
 ZBox* z_box(ZVal v);
 void* z_new_env(size_t n);
+void* z_new_env_ex(int nbox, const size_t* offs, size_t n);
 ZVal  z_closure(ZFnPtr fn, void* env, const char* name);
 void* z_fn_env(ZVal f);
 ZVal  z_call(ZVal f, int argc, ZVal* argv);
 
 /* ── 运行时初始化（Windows 下 stdout 置二进制模式，对齐解释器 LF）── */
 void z_rt_init(void);
+
+/* -- 内存回收（第27轮 · mark-sweep GC）--------------------------------
+ * 语义契约：只回收从根集不可达的堆对象；可达对象永不回收。
+ * 安全点契约：只在 z_gc_safepoint() 内可能回收。
+ * 关闭方式：环境变量 ZUZO_GC=off 或 z_gc_set_enabled(0)。
+ */
+void z_gc_init(void);
+void z_gc_set_enabled(int on);
+int  z_gc_enabled(void);
+void z_gc_set_threshold(size_t bytes);
+void z_gc_collect_now(void);
+void z_gc_stats(size_t* live_bytes, size_t* total_bytes, long* collections, long* objects);
+/* 安全点：vals = 当前作用域 ZVal 变量地址表；boxes = 当前作用域 ZBox* 变量；env = 本帧 env payload（无则 NULL） */
+void z_gc_safepoint(int nvals, ZVal** vals, int nboxes, ZBox** boxes, void* env);
+
 
 /* ── 错误捕获（执行/遇到）───────────────────────────── */
 typedef struct ZTryFrame {

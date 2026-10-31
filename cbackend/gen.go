@@ -6,6 +6,7 @@ package cbackend
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -150,6 +151,7 @@ func Generate(program *ast.Program, opt Options) (code string, err error) {
 		if err := g.genStmt(stmt); err != nil {
 			return "", err
 		}
+		g.emitSafepoint()
 	}
 	g.popScope()
 	g.line("    return 0;")
@@ -242,6 +244,7 @@ func (g *Gen) genFunction(fi *fnInfo) error {
 		if err := g.genStmt(stmt); err != nil {
 			return err
 		}
+		g.emitSafepoint()
 	}
 	g.line("    return z_null();")
 	g.popScope()
@@ -288,6 +291,57 @@ func (g *Gen) lookupVar(name string) (varSlot, bool) {
 }
 
 func (g *Gen) declare(name string) { g.setVar(name, varSlot{kind: vPlain}) }
+
+// gcRoots 生成安全点的根集表达式：当前各层作用域的 ZVal 变量 + ZBox* 变量 + 本帧 env。
+// 口径：内层作用域优先（同名遮蔽时内层为准）；vCapture 走 env，由 env 根覆盖。
+func (g *Gen) gcRoots() string {
+	seen := map[string]bool{}
+	var vals, boxes []string
+	for i := len(g.scopes) - 1; i >= 0; i-- {
+		sc := g.scopes[i]
+		names := make([]string, 0, len(sc))
+		for n := range sc {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			if seen[n] {
+				continue
+			}
+			seen[n] = true
+			switch sc[n].kind {
+			case vPlain:
+				vals = append(vals, "&"+cVarName(n))
+			case vBox:
+				boxes = append(boxes, cVarName(n))
+			}
+		}
+	}
+	nvals, vlist := "0", "NULL"
+	if len(vals) > 0 {
+		nvals = fmt.Sprintf("%d", len(vals))
+		vlist = "(ZVal*[]){" + strings.Join(vals, ", ") + "}"
+	}
+	nboxes, blist := "0", "NULL"
+	if len(boxes) > 0 {
+		nboxes = fmt.Sprintf("%d", len(boxes))
+		blist = "(ZBox*[]){" + strings.Join(boxes, ", ") + "}"
+	}
+	env := "NULL"
+	if g.cur != nil && g.cur.EnvType != "" {
+		env = "env"
+	}
+	return fmt.Sprintf("z_gc_safepoint(%s, %s, %s, %s, %s);", nvals, vlist, nboxes, blist, env)
+}
+
+// emitSafepoint 在语句边界埋安全点：只有累计分配超阈值时才真正回收。
+func (g *Gen) emitSafepoint() {
+	// 排障开关：ZUZO_NO_SAFEPOINT=1 时不生成安全点（用于定位 nativecc/对拍差异）
+	if os.Getenv("ZUZO_NO_SAFEPOINT") != "" {
+		return
+	}
+	g.line("    %s", g.gcRoots())
+}
 
 func (g *Gen) temp() string {
 	g.tmpSeq++

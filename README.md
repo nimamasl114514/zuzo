@@ -128,7 +128,7 @@ go test ./...         # Go 单测（含原生循环、SAP、混合切块、nativ
 - [Python 支持](docs/python-support.md)
 - [Python 前端（gopapy 双轨）](docs/python-parser.md)
 - [性能模型与观测](docs/performance.md)
-- [C 后端](docs/c-backend.md) · [nativecc 内嵌编译器](docs/nativecc.md)
+- [C 后端](docs/c-backend.md) · [nativecc 内嵌编译器](docs/nativecc.md) · [运行时内存回收](docs/gc.md)
 - [CFFI](docs/cffi.md) · [WASM FFI](docs/wasm-ffi.md)
 - [开发日志](交付-累计.md)
 

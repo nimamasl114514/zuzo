@@ -167,7 +167,7 @@ func (g *Gen) genClosureRef(fi *fnInfo) (string, error) {
 		return fmt.Sprintf("z_closure(%s, NULL, %s)", fi.CName, cString(display)), nil
 	}
 	env := g.temp()
-	g.line("%s* %s = (%s*)z_new_env(sizeof(%s));", fi.EnvType, env, fi.EnvType, fi.EnvType)
+	g.line("%s* %s = (%s*)z_new_env_ex(%d, %s, sizeof(%s));", fi.EnvType, env, fi.EnvType, len(fi.Captures), envOffsets(len(fi.Captures)), fi.EnvType)
 	for _, name := range fi.Captures {
 		slot, ok := g.lookupVar(name)
 		if !ok {
@@ -494,4 +494,16 @@ func sortExprs(es []ast.Expression) {
 			es[j], es[j-1] = es[j-1], es[j]
 		}
 	}
+}
+
+// envOffsets 生成 ZBox* 偏移表的 C 复合字面量（env 字段全是 ZBox*，8 字节）
+func envOffsets(n int) string {
+	if n <= 0 {
+		return "NULL"
+	}
+	parts := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		parts = append(parts, fmt.Sprintf("%d", i*8))
+	}
+	return "(size_t[]){" + strings.Join(parts, ", ") + "}"
 }
