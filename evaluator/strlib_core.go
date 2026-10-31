@@ -115,7 +115,7 @@ func argHash(fn string, args []object.Object, i int, what string) (*object.Hash,
 }
 
 // 常用返回值构造（减少重复 noise）
-func strObj(s string) *object.String  { return &object.String{Value: s} }
+func strObj(s string) *object.String { return &object.String{Value: s} }
 func intObj(n int64) *object.Integer { return &object.Integer{Value: n} }
 func boolObj(b bool) object.Object   { return nativeBoolToBooleanObject(b) }
 

@@ -622,11 +622,21 @@ func evalIntegerInfixExpressionWithNode(node ast.Node, op string, left, right ob
 
 	switch op {
 	case "+":
-		return &object.Integer{Value: leftVal + rightVal}
+		// 统一溢出口径（2026-10-25 第20轮）：超 int64 抛 E210，与原生循环路径一致
+		if res, v := guardIntArith("+", leftVal, rightVal); v != guardOverflow {
+			return &object.Integer{Value: res}
+		}
+		return newErrorWithNode(node, diagnostic.ErrIntegerOverflow.Code, "整数溢出：结果超出 int64 表示范围")
 	case "-":
-		return &object.Integer{Value: leftVal - rightVal}
+		if res, v := guardIntArith("-", leftVal, rightVal); v != guardOverflow {
+			return &object.Integer{Value: res}
+		}
+		return newErrorWithNode(node, diagnostic.ErrIntegerOverflow.Code, "整数溢出：结果超出 int64 表示范围")
 	case "*":
-		return &object.Integer{Value: leftVal * rightVal}
+		if res, v := guardIntArith("*", leftVal, rightVal); v != guardOverflow {
+			return &object.Integer{Value: res}
+		}
+		return newErrorWithNode(node, diagnostic.ErrIntegerOverflow.Code, "整数溢出：结果超出 int64 表示范围")
 	case "/":
 		if rightVal == 0 {
 			return newErrorWithNode(node, diagnostic.ErrDivisionByZero.Code, "除零错误")
@@ -1342,6 +1352,7 @@ func registerBuiltins(env *object.Environment) {
 		"http服务":   builtinHttpServe,
 		"http服务后台": builtinHttpServeBackground,
 		"http流请求":  builtinHttpStreamRequest,
+		"http反代":   builtinHttpReverseProxy,
 
 		// --- JSON（builtins_json.go） ---
 		"json解析":  builtinJsonParse,

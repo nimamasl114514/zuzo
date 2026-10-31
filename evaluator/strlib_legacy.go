@@ -54,7 +54,7 @@ func init() {
 		"正则提取":   builtinRegexExtract,
 
 		// ---- 通用 ----
-		"转文本": builtinStr,     // 文本.转文本(42) → "42"
-		"格式化": builtinFormat,  // 文本.格式化("%d-%s", 42, "x")
+		"转文本": builtinStr,    // 文本.转文本(42) → "42"
+		"格式化": builtinFormat, // 文本.格式化("%d-%s", 42, "x")
 	})
 }

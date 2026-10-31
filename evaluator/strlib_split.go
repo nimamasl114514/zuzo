@@ -13,15 +13,15 @@ import (
 
 func init() {
 	registerStringMethods(map[string]object.BuiltinFunction{
-		"分割":    strSplit,
-		"分割次":   strSplitN,
-		"反向分割":  strRSplit,
-		"反向分割次": strRSplitN,
-		"按行分割":  strSplitLines,
-		"分词":    strFields,
-		"分词按":   strFieldsFunc,
-		"连接":    builtinJoin, // 复用 builtins_array.go 既有实现（数组, 分隔符）
-		"位置分割":  strPartition,
+		"分割":     strSplit,
+		"分割次":    strSplitN,
+		"反向分割":   strRSplit,
+		"反向分割次":  strRSplitN,
+		"按行分割":   strSplitLines,
+		"分词":     strFields,
+		"分词按":    strFieldsFunc,
+		"连接":     builtinJoin, // 复用 builtins_array.go 既有实现（数组, 分隔符）
+		"位置分割":   strPartition,
 		"反向位置分割": strRPartition,
 	})
 }

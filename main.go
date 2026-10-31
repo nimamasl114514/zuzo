@@ -109,6 +109,10 @@ func main() {
 			os.Exit(1)
 		}
 		analyzeFile(args[1])
+	case "--emit-c":
+		emitCCommand(args[1:])
+	case "--emit-exe":
+		emitExeCommand(args[1:])
 	case "--py":
 		pyrt.RunREPL(os.Stdin, os.Stdout, os.Stderr)
 	case "--py-repl":
@@ -527,6 +531,8 @@ func printHelp() {
   zuzo -e "代码"    执行内联代码
   zuzo -a <文件>    拓扑指纹分析（查重/死代码/CSE）
   zuzo -c <文件>    静态类型检查
+  zuzo --emit-c <文件.hy> [-o 出.c]   编译为 C 源码（C 后端）
+  zuzo --emit-exe <文件.hy> [-o 出.exe]  编译为可执行文件（C → gcc）
   zuzo --help       显示帮助
   zuzo --version    显示版本
 

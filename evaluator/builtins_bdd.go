@@ -564,6 +564,13 @@ func objectsEqual(a, b object.Object) bool {
 			}
 			return true
 		}
+	case *object.Error:
+		// 两个错误对象按「码 + 行 + 消息」判等（2026-10-25 第20轮）。
+		// 修复前这里落到 return false，导致影子模式对「两侧同样报 E210」
+		// 误报为「返回值不一致」——假阳性会掩盖真问题。
+		if bv, ok := b.(*object.Error); ok {
+			return av.Code == bv.Code && av.Line == bv.Line && av.Message == bv.Message
+		}
 	}
 	return false
 }

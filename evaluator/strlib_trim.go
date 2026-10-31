@@ -14,18 +14,18 @@ import (
 
 func init() {
 	registerStringMethods(map[string]object.BuiltinFunction{
-		"去空白":  strTrimSpace,
-		"裁剪":   strTrim,
-		"左裁剪":  strTrimLeft,
-		"右裁剪":  strTrimRight,
-		"去左空白": strTrimLeftSpace,
-		"去右空白": strTrimRightSpace,
-		"去前缀":  strTrimPrefix,
-		"去后缀":  strTrimSuffix,
-		"前缀":   strHasPrefix,
-		"后缀":   strHasSuffix,
-		"前缀任一": strHasPrefixAny,
-		"后缀任一": strHasSuffixAny,
+		"去空白":   strTrimSpace,
+		"裁剪":    strTrim,
+		"左裁剪":   strTrimLeft,
+		"右裁剪":   strTrimRight,
+		"去左空白":  strTrimLeftSpace,
+		"去右空白":  strTrimRightSpace,
+		"去前缀":   strTrimPrefix,
+		"去后缀":   strTrimSuffix,
+		"前缀":    strHasPrefix,
+		"后缀":    strHasSuffix,
+		"前缀任一":  strHasPrefixAny,
+		"后缀任一":  strHasSuffixAny,
 		"去除不可见": builtinRemoveInvisible, // 复用 builtins_utf8.go 既有实现
 	})
 }

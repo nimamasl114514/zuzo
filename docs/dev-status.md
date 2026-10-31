@@ -6,9 +6,10 @@
 
 | 套件 | 结果 | 说明 |
 |---|---|---|
-| `run_tests.sh`（Python 对拍） | **30 / 34 通过** | 3 个失败为运行时能力缺口（见 §二），1 个 helper 跳过 |
+| `run_tests.sh` 第 1 轮（Python 对拍） | **33 / 33 通过** | 与 CPython 3.12 逐字节 diff，1 个 helper 跳过 |
+| `run_tests.sh` 第 2 轮（影子模式） | **33 / 33 双轨一致** | `--shadow` 对每个用例跑 SAP + Tree-Walk，输出含「影子模式断言失败」即判回归 |
 | `run_tests_mix.sh`（混合 golden） | **15 / 15 通过** | 切块、类型桥、调用桥、作用域同步 |
-| `go test ./...` | **全绿** | `ast` / `mix` / `tests` 三包（含原生循环、SAP、De Bruijn 基准） |
+| `go test ./...` | **5 包全绿** | `ast` / `evaluator` / `fuzz` / `mix` / `tests`（其余 11 包为 `no test files`） |
 | `gofmt -l .` | 干净 | CI 强制 |
 
 ## 二、3 个失败用例与根因（2026-10-24 第10轮后）

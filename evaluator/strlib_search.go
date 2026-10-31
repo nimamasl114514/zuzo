@@ -14,18 +14,18 @@ import (
 
 func init() {
 	registerStringMethods(map[string]object.BuiltinFunction{
-		"查找":    strIndex,
-		"反向查找":  strLastIndex,
-		"查找任一":  strIndexAny,
+		"查找":     strIndex,
+		"反向查找":   strLastIndex,
+		"查找任一":   strIndexAny,
 		"反向查找任一": strLastIndexAny,
-		"查找字符":  strIndexRune,
-		"包含":    strContains,
-		"包含任一":  strContainsAny,
-		"计数":    strCount,
-		"替换":    strReplace,
-		"替换次":   strReplaceN,
-		"批量替换":  strReplaceMulti,
-		"替换字符":  strTranslate,
+		"查找字符":   strIndexRune,
+		"包含":     strContains,
+		"包含任一":   strContainsAny,
+		"计数":     strCount,
+		"替换":     strReplace,
+		"替换次":    strReplaceN,
+		"批量替换":   strReplaceMulti,
+		"替换字符":   strTranslate,
 	})
 }
 

@@ -281,26 +281,40 @@ func (c *SAPCompiler) compileIntInfix(node ast.Node, op string, leftFn, rightFn 
 	return c.compileIntInfixGuarded(node, op, leftFn, rightFn)
 }
 
-// compileIntInfixPure 零检查快闭包：运行期零分支、零错误检查
+// compileIntInfixPure 整数硬化闭包：只保留溢出判定（2026-10-25 第20轮起）
+//
+// 曾经这里是「零分支零检查」——实测发现它与 Tree-Walk 的 E210 口径分叉：
+// while 的 escape 回退到 evalWhileStatement 后，子表达式仍命中本闭包，
+// 于是 9223372036854775807 + 1 静默回绕，把“已修复”的 bug 从另一扇门放回来。
+// 溢出判定是两次比较（addOverflows），相对 map 查找的成本可忽略，故统一保留。
 func (c *SAPCompiler) compileIntInfixPure(node ast.Node, op string, leftFn, rightFn CompileFunc) CompileFunc {
 	switch op {
 	case "+":
 		return func(env *object.Environment) object.Object {
 			l := leftFn(env).(*object.Integer).Value
 			r := rightFn(env).(*object.Integer).Value
-			return &object.Integer{Value: l + r}
+			if res, v := guardIntArith("+", l, r); v != guardOverflow {
+				return &object.Integer{Value: res}
+			}
+			return newErrorWithNode(node, diagnostic.ErrIntegerOverflow.Code, "整数溢出：结果超出 int64 表示范围")
 		}
 	case "-":
 		return func(env *object.Environment) object.Object {
 			l := leftFn(env).(*object.Integer).Value
 			r := rightFn(env).(*object.Integer).Value
-			return &object.Integer{Value: l - r}
+			if res, v := guardIntArith("-", l, r); v != guardOverflow {
+				return &object.Integer{Value: res}
+			}
+			return newErrorWithNode(node, diagnostic.ErrIntegerOverflow.Code, "整数溢出：结果超出 int64 表示范围")
 		}
 	case "*":
 		return func(env *object.Environment) object.Object {
 			l := leftFn(env).(*object.Integer).Value
 			r := rightFn(env).(*object.Integer).Value
-			return &object.Integer{Value: l * r}
+			if res, v := guardIntArith("*", l, r); v != guardOverflow {
+				return &object.Integer{Value: res}
+			}
+			return newErrorWithNode(node, diagnostic.ErrIntegerOverflow.Code, "整数溢出：结果超出 int64 表示范围")
 		}
 	case "<":
 		return func(env *object.Environment) object.Object {
@@ -351,7 +365,10 @@ func (c *SAPCompiler) compileIntInfixGuarded(node ast.Node, op string, leftFn, r
 			if err != nil {
 				return err
 			}
-			return &object.Integer{Value: lv.(*object.Integer).Value + rv.(*object.Integer).Value}
+			if res, v := guardIntArith("+", lv.(*object.Integer).Value, rv.(*object.Integer).Value); v != guardOverflow {
+				return &object.Integer{Value: res}
+			}
+			return newErrorWithNode(node, diagnostic.ErrIntegerOverflow.Code, "整数溢出：结果超出 int64 表示范围")
 		}
 	case "-":
 		return func(env *object.Environment) object.Object {
@@ -359,7 +376,10 @@ func (c *SAPCompiler) compileIntInfixGuarded(node ast.Node, op string, leftFn, r
 			if err != nil {
 				return err
 			}
-			return &object.Integer{Value: lv.(*object.Integer).Value - rv.(*object.Integer).Value}
+			if res, v := guardIntArith("-", lv.(*object.Integer).Value, rv.(*object.Integer).Value); v != guardOverflow {
+				return &object.Integer{Value: res}
+			}
+			return newErrorWithNode(node, diagnostic.ErrIntegerOverflow.Code, "整数溢出：结果超出 int64 表示范围")
 		}
 	case "*":
 		return func(env *object.Environment) object.Object {
@@ -367,7 +387,10 @@ func (c *SAPCompiler) compileIntInfixGuarded(node ast.Node, op string, leftFn, r
 			if err != nil {
 				return err
 			}
-			return &object.Integer{Value: lv.(*object.Integer).Value * rv.(*object.Integer).Value}
+			if res, v := guardIntArith("*", lv.(*object.Integer).Value, rv.(*object.Integer).Value); v != guardOverflow {
+				return &object.Integer{Value: res}
+			}
+			return newErrorWithNode(node, diagnostic.ErrIntegerOverflow.Code, "整数溢出：结果超出 int64 表示范围")
 		}
 	case "/":
 		return func(env *object.Environment) object.Object {

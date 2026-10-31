@@ -23,6 +23,7 @@ package evaluator
 
 import (
 	"zuzo/ast"
+	"zuzo/diagnostic"
 	"zuzo/object"
 )
 
@@ -173,47 +174,99 @@ func (c *SAPCompiler) tryCompileWhileSmiNative(n *ast.WhileStatement) CompileFun
 				iVal = iv.Value
 			}
 		}
+		// 初值必须能无损编码进 Smi，否则 Smi 槽位一写就截断成错值（第20轮补）
+		if !dbSmiFits(iVal) {
+			return evalWhileStatement(n, env)
+		}
 		env.SetValueSlot(p.loopSlot, object.Smi(iVal))
 
+		var errObj object.Object
+		escape := false
+	loop:
 		for {
 			if whileCondBreaks(p.condOp, iVal, p.condVal) {
 				break
 			}
 			for _, op := range ops {
+				var v1, v2 int64
 				switch op.kind {
-				case opAdd:
-					v1 := env.GetValueSlot(op.srcSlot1).AsSmi()
-					v2 := env.GetValueSlot(op.srcSlot2).AsSmi()
-					env.SetValueSlot(op.destSlot, object.Smi(v1+v2))
-				case opSub:
-					v1 := env.GetValueSlot(op.srcSlot1).AsSmi()
-					v2 := env.GetValueSlot(op.srcSlot2).AsSmi()
-					env.SetValueSlot(op.destSlot, object.Smi(v1-v2))
-				case opMul:
-					v1 := env.GetValueSlot(op.srcSlot1).AsSmi()
-					v2 := env.GetValueSlot(op.srcSlot2).AsSmi()
-					env.SetValueSlot(op.destSlot, object.Smi(v1*v2))
-				case opAddConst:
-					v1 := env.GetValueSlot(op.srcSlot1).AsSmi()
-					env.SetValueSlot(op.destSlot, object.Smi(v1+op.constVal))
-				case opSubConst:
-					v1 := env.GetValueSlot(op.srcSlot1).AsSmi()
-					env.SetValueSlot(op.destSlot, object.Smi(v1-op.constVal))
-				case opMulConst:
-					v1 := env.GetValueSlot(op.srcSlot1).AsSmi()
-					env.SetValueSlot(op.destSlot, object.Smi(v1*op.constVal))
-				case opAssignConst:
-					env.SetValueSlot(op.destSlot, object.Smi(op.constVal))
+				case opAdd, opSub, opMul:
+					v1 = env.GetValueSlot(op.srcSlot1).AsSmi()
+					v2 = env.GetValueSlot(op.srcSlot2).AsSmi()
 				case opAssignVar:
 					env.SetValueSlot(op.destSlot, env.GetValueSlot(op.srcSlot1))
+					continue
+				case opAssignConst:
+					// 无源操作数，constVal 交给 guardNativeOp 判区间
+				default:
+					v1 = env.GetValueSlot(op.srcSlot1).AsSmi()
 				}
+				// 热路径：按 kind 直接分派到可内联的小函数（不调 guardNativeOp）
+				var res int64
+				var verdict guardVerdict
+				switch op.kind {
+				case opAdd:
+					res, verdict = addChecked(v1, v2)
+				case opSub:
+					res, verdict = subChecked(v1, v2)
+				case opMul:
+					res, verdict = mulChecked(v1, v2)
+				case opAddConst:
+					res, verdict = addChecked(v1, op.constVal)
+				case opSubConst:
+					res, verdict = subChecked(v1, op.constVal)
+				case opMulConst:
+					res, verdict = mulChecked(v1, op.constVal)
+				case opAssignConst:
+					res, verdict = op.constVal, guardOK
+					if !dbSmiFits(res) {
+						verdict = guardEscape
+					}
+				default:
+					res, verdict = v1, guardOK
+				}
+				switch verdict {
+				case guardOverflow:
+					errObj = newErrorWithNode(n, diagnostic.ErrIntegerOverflow.Code,
+						"循环体整数运算溢出：结果超出 int64 表示范围")
+					break loop
+				case guardEscape:
+					escape = true
+					break loop
+				}
+				env.SetValueSlot(op.destSlot, object.Smi(res))
 			}
+
+			// Update: 计数器必须精确；越界立即撤离原生路径，避免死循环
 			if p.updateOp == "+" {
+				if addOverflows(iVal, p.stepVal) {
+					errObj = newErrorWithNode(n, diagnostic.ErrIntegerOverflow.Code,
+						"循环计数器溢出：结果超出 int64 表示范围")
+					break loop
+				}
 				iVal += p.stepVal
 			} else {
+				if subOverflows(iVal, p.stepVal) {
+					errObj = newErrorWithNode(n, diagnostic.ErrIntegerOverflow.Code,
+						"循环计数器溢出：结果超出 int64 表示范围")
+					break loop
+				}
 				iVal -= p.stepVal
 			}
+			if !dbSmiFits(iVal) {
+				escape = true
+				break loop
+			}
 			env.SetValueSlot(p.loopSlot, object.Smi(iVal))
+		}
+
+		if errObj != nil {
+			return errObj
+		}
+		if escape {
+			// 撤出原生路径：L4 只写 valueSlots，store/slots 仍是循环前状态，
+			// 直接把整条 while 语句交给 evalWhileStatement 重跑。
+			return evalWhileStatement(n, env)
 		}
 
 		// 循环退出：Smi → Object 同步回 map + Object 槽位
@@ -270,48 +323,111 @@ func (c *SAPCompiler) tryCompileWhileDeBruijnNative(n *ast.WhileStatement) Compi
 			copy(ctxSlots, envSlots)
 		}
 
-		iVal := ctx.GetSmi(0, p.loopSlot)
+		// 初值从 Object 槽位取真值：上游 let 写入超界值时 Smi 槽位已被截断，
+		// 直接 ctx.GetSmi 会读到错的负数并导致条件永真死循环（第20轮实测）。
+		var iVal int64
+		if obj := env.GetSlot(p.loopSlot); obj != nil {
+			if iv, ok := obj.(*object.Integer); ok {
+				iVal = iv.Value
+			}
+		}
+		if !dbSmiFits(iVal) {
+			return fallbackFn(env)
+		}
 		ctx.SetSmi(0, p.loopSlot, iVal)
 
+		var errObj object.Object
+		escape := false
+	loop:
 		for {
 			if whileCondBreaks(p.condOp, iVal, p.condVal) {
 				break
 			}
 			for _, op := range dbOps {
+				var v1, v2 int64
+				switch op.kind {
+				case opAdd, opSub, opMul:
+					v1 = ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
+					v2 = ctx.Get(op.srcIdx2.Depth, op.srcIdx2.Slot).AsSmi()
+				case opAssignVar:
+					// 直拷源 Value：源值本来就已落在 Smi 区间内
+					ctx.Set(op.destIdx.Depth, op.destIdx.Slot, ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot))
+					continue
+				case opAssignConst:
+					// 无源操作数，constVal 交给 guardNativeOp 判区间
+				default:
+					v1 = ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
+				}
+				// 热路径：按 kind 直接分派到可内联的小函数（不调 guardNativeOp）
+				var res int64
+				var verdict guardVerdict
 				switch op.kind {
 				case opAdd:
-					v1 := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
-					v2 := ctx.Get(op.srcIdx2.Depth, op.srcIdx2.Slot).AsSmi()
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, v1+v2)
+					res, verdict = addChecked(v1, v2)
 				case opSub:
-					v1 := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
-					v2 := ctx.Get(op.srcIdx2.Depth, op.srcIdx2.Slot).AsSmi()
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, v1-v2)
+					res, verdict = subChecked(v1, v2)
 				case opMul:
-					v1 := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
-					v2 := ctx.Get(op.srcIdx2.Depth, op.srcIdx2.Slot).AsSmi()
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, v1*v2)
+					res, verdict = mulChecked(v1, v2)
 				case opAddConst:
-					v1 := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, v1+op.constVal)
+					res, verdict = addChecked(v1, op.constVal)
 				case opSubConst:
-					v1 := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, v1-op.constVal)
+					res, verdict = subChecked(v1, op.constVal)
 				case opMulConst:
-					v1 := ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot).AsSmi()
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, v1*op.constVal)
+					res, verdict = mulChecked(v1, op.constVal)
 				case opAssignConst:
-					ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, op.constVal)
-				case opAssignVar:
-					ctx.Set(op.destIdx.Depth, op.destIdx.Slot, ctx.Get(op.srcIdx1.Depth, op.srcIdx1.Slot))
+					res, verdict = op.constVal, guardOK
+					if !dbSmiFits(res) {
+						verdict = guardEscape
+					}
+				default:
+					res, verdict = v1, guardOK
 				}
+				switch verdict {
+				case guardOverflow:
+					errObj = newErrorWithNode(n, diagnostic.ErrIntegerOverflow.Code,
+						"循环体整数运算溢出：结果超出 int64 表示范围")
+					break loop
+				case guardEscape:
+					escape = true
+					break loop
+				}
+				ctx.SetSmi(op.destIdx.Depth, op.destIdx.Slot, res)
 			}
+
+			// Update: 计数器必须精确；越界立即撤离原生路径，避免死循环
 			if p.updateOp == "+" {
+				if addOverflows(iVal, p.stepVal) {
+					errObj = newErrorWithNode(n, diagnostic.ErrIntegerOverflow.Code,
+						"循环计数器溢出：结果超出 int64 表示范围")
+					break loop
+				}
 				iVal += p.stepVal
 			} else {
+				if subOverflows(iVal, p.stepVal) {
+					errObj = newErrorWithNode(n, diagnostic.ErrIntegerOverflow.Code,
+						"循环计数器溢出：结果超出 int64 表示范围")
+					break loop
+				}
 				iVal -= p.stepVal
 			}
+			if !dbSmiFits(iVal) {
+				escape = true
+				break loop
+			}
 			ctx.SetSmi(0, p.loopSlot, iVal)
+		}
+
+		if errObj != nil {
+			return errObj
+		}
+		if escape {
+			// 撤出原生路径：原生路径只写 Context，Environment 仍是循环前状态。
+			// 先把 Context 帧恢复成入口快照（valueSlots 在原生路径期间未被改写），
+			// 再把整条 while 语句交给 evalWhileStatement 用 *object.Integer 重跑。
+			if envSlots := env.GetValueSlots(); len(envSlots) > 0 {
+				copy(ctx.CurrentFrame(), envSlots)
+			}
+			return evalWhileStatement(n, env)
 		}
 
 		// 循环退出：Context → Environment 同步（供后续非原生路径使用）

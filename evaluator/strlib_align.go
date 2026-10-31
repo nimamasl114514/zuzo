@@ -14,11 +14,11 @@ import (
 
 func init() {
 	registerStringMethods(map[string]object.BuiltinFunction{
-		"左对齐":  strLJust,
-		"右对齐":  strRJust,
-		"居中":   strCenter,
-		"零填充":  strZFill,
-		"重复":   strRepeat,
+		"左对齐":   strLJust,
+		"右对齐":   strRJust,
+		"居中":    strCenter,
+		"零填充":   strZFill,
+		"重复":    strRepeat,
 		"展开制表符": strExpandTabs,
 	})
 }

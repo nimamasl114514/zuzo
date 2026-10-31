@@ -522,7 +522,9 @@ func (c *SAPCompiler) tryCompileForNative(n *ast.ForStatement) CompileFunc {
 					}
 					v1 := v1obj.(*object.Integer).Value
 					v2 := v2obj.(*object.Integer).Value
-					env.SetSlot(op.destSlot, &object.Integer{Value: v1 + v2})
+					if err := setIntSlot(n, env, op.destSlot, "+", v1, v2); err != nil {
+						return err
+					}
 				case opSub:
 					v1obj := env.GetSlot(op.srcSlot1)
 					v2obj := env.GetSlot(op.srcSlot2)
@@ -531,7 +533,9 @@ func (c *SAPCompiler) tryCompileForNative(n *ast.ForStatement) CompileFunc {
 					}
 					v1 := v1obj.(*object.Integer).Value
 					v2 := v2obj.(*object.Integer).Value
-					env.SetSlot(op.destSlot, &object.Integer{Value: v1 - v2})
+					if err := setIntSlot(n, env, op.destSlot, "-", v1, v2); err != nil {
+						return err
+					}
 				case opMul:
 					v1obj := env.GetSlot(op.srcSlot1)
 					v2obj := env.GetSlot(op.srcSlot2)
@@ -540,28 +544,36 @@ func (c *SAPCompiler) tryCompileForNative(n *ast.ForStatement) CompileFunc {
 					}
 					v1 := v1obj.(*object.Integer).Value
 					v2 := v2obj.(*object.Integer).Value
-					env.SetSlot(op.destSlot, &object.Integer{Value: v1 * v2})
+					if err := setIntSlot(n, env, op.destSlot, "*", v1, v2); err != nil {
+						return err
+					}
 				case opAddConst:
 					v1obj := env.GetSlot(op.srcSlot1)
 					if v1obj == nil {
 						return newErrorWithNode(n, diagnostic.ErrUndefinedIdentifier.Code, "循环变量未初始化")
 					}
 					v1 := v1obj.(*object.Integer).Value
-					env.SetSlot(op.destSlot, &object.Integer{Value: v1 + op.constVal})
+					if err := setIntSlot(n, env, op.destSlot, "+", v1, op.constVal); err != nil {
+						return err
+					}
 				case opSubConst:
 					v1obj := env.GetSlot(op.srcSlot1)
 					if v1obj == nil {
 						return newErrorWithNode(n, diagnostic.ErrUndefinedIdentifier.Code, "循环变量未初始化")
 					}
 					v1 := v1obj.(*object.Integer).Value
-					env.SetSlot(op.destSlot, &object.Integer{Value: v1 - op.constVal})
+					if err := setIntSlot(n, env, op.destSlot, "-", v1, op.constVal); err != nil {
+						return err
+					}
 				case opMulConst:
 					v1obj := env.GetSlot(op.srcSlot1)
 					if v1obj == nil {
 						return newErrorWithNode(n, diagnostic.ErrUndefinedIdentifier.Code, "循环变量未初始化")
 					}
 					v1 := v1obj.(*object.Integer).Value
-					env.SetSlot(op.destSlot, &object.Integer{Value: v1 * op.constVal})
+					if err := setIntSlot(n, env, op.destSlot, "*", v1, op.constVal); err != nil {
+						return err
+					}
 				case opAssignConst:
 					env.SetSlot(op.destSlot, &object.Integer{Value: op.constVal})
 				case opAssignVar:
@@ -573,14 +585,12 @@ func (c *SAPCompiler) tryCompileForNative(n *ast.ForStatement) CompileFunc {
 				}
 			}
 
-			// Update: 直接 int64 运算
-			switch updateOp {
-			case "+":
-				iVal += stepVal
-			case "-":
-				iVal -= stepVal
+			// Update: 计数器推进（溢出显式报 E210，不静默回绕）
+			nv, uerr := updateIntSlot(n, env, loopSlot, updateOp, iVal, stepVal)
+			if uerr != nil {
+				return uerr
 			}
-			env.SetSlot(loopSlot, &object.Integer{Value: iVal})
+			iVal = nv
 		}
 
 		// 循环结束后：将槽位同步回 map（保证后续 Eval 读取正确）
@@ -689,8 +699,15 @@ func (c *SAPCompiler) tryCompileForSmiNative(n *ast.ForStatement) CompileFunc {
 	return func(env *object.Environment) object.Object {
 		// Init: 将循环变量编码为 Smi 写入 valueSlots
 		iVal := initVal
+		// 常量为负无穷边界时 Smi 装不下，直接走普通路径（第20轮补）
+		if !dbSmiFits(iVal) {
+			return evalForStatement(n, env)
+		}
 		env.SetValueSlot(loopSlot, object.Smi(iVal))
 
+		var errObj object.Object
+		escape := false
+	loop:
 		for {
 			// Condition: 直接 int64 比较（iVal 是本地 int64 变量，在寄存器中）
 			shouldBreak := false
@@ -713,44 +730,64 @@ func (c *SAPCompiler) tryCompileForSmiNative(n *ast.ForStatement) CompileFunc {
 			// SetValueSlot 接收 Smi Value，Smi() 是一次左移+OR（1周期）
 			// 对比 Level 3：GetSlot → Object 接口 → 类型断言 → 提取 int64 → 计算 → 创建 Integer → SetSlot
 			for _, op := range ops {
+				var v1, v2 int64
+				hasV2 := false
 				switch op.kind {
-				case opAdd:
-					v1 := env.GetValueSlot(op.srcSlot1).AsSmi()
-					v2 := env.GetValueSlot(op.srcSlot2).AsSmi()
-					env.SetValueSlot(op.destSlot, object.Smi(v1+v2))
-				case opSub:
-					v1 := env.GetValueSlot(op.srcSlot1).AsSmi()
-					v2 := env.GetValueSlot(op.srcSlot2).AsSmi()
-					env.SetValueSlot(op.destSlot, object.Smi(v1-v2))
-				case opMul:
-					v1 := env.GetValueSlot(op.srcSlot1).AsSmi()
-					v2 := env.GetValueSlot(op.srcSlot2).AsSmi()
-					env.SetValueSlot(op.destSlot, object.Smi(v1*v2))
-				case opAddConst:
-					v1 := env.GetValueSlot(op.srcSlot1).AsSmi()
-					env.SetValueSlot(op.destSlot, object.Smi(v1+op.constVal))
-				case opSubConst:
-					v1 := env.GetValueSlot(op.srcSlot1).AsSmi()
-					env.SetValueSlot(op.destSlot, object.Smi(v1-op.constVal))
-				case opMulConst:
-					v1 := env.GetValueSlot(op.srcSlot1).AsSmi()
-					env.SetValueSlot(op.destSlot, object.Smi(v1*op.constVal))
-				case opAssignConst:
-					env.SetValueSlot(op.destSlot, object.Smi(op.constVal))
+				case opAdd, opSub, opMul:
+					v1 = env.GetValueSlot(op.srcSlot1).AsSmi()
+					v2 = env.GetValueSlot(op.srcSlot2).AsSmi()
+					hasV2 = true
 				case opAssignVar:
-					srcVal := env.GetValueSlot(op.srcSlot1)
-					env.SetValueSlot(op.destSlot, srcVal) // 直接拷贝 Value，零开销
+					env.SetValueSlot(op.destSlot, env.GetValueSlot(op.srcSlot1))
+					continue
+				case opAssignConst:
+					// 无源操作数，constVal 交给 guardNativeOp 判区间
+				default:
+					v1 = env.GetValueSlot(op.srcSlot1).AsSmi()
 				}
+				res, verdict := guardNativeOp(op.kind, v1, v2, hasV2, op.constVal)
+				switch verdict {
+				case guardOverflow:
+					errObj = newErrorWithNode(n, diagnostic.ErrIntegerOverflow.Code,
+						"循环体整数运算溢出：结果超出 int64 表示范围")
+					break loop
+				case guardEscape:
+					escape = true
+					break loop
+				}
+				env.SetValueSlot(op.destSlot, object.Smi(res))
 			}
 
-			// Update: 直接 int64 运算（iVal 在寄存器中）
-			switch updateOp {
-			case "+":
+			// Update: 计数器推进（溢出报 E210，超 Smi 区间撤离原生路径）
+			if updateOp == "+" {
+				if addOverflows(iVal, stepVal) {
+					errObj = newErrorWithNode(n, diagnostic.ErrIntegerOverflow.Code,
+						"循环计数器溢出：结果超出 int64 表示范围")
+					break loop
+				}
 				iVal += stepVal
-			case "-":
+			} else {
+				if subOverflows(iVal, stepVal) {
+					errObj = newErrorWithNode(n, diagnostic.ErrIntegerOverflow.Code,
+						"循环计数器溢出：结果超出 int64 表示范围")
+					break loop
+				}
 				iVal -= stepVal
 			}
+			if !dbSmiFits(iVal) {
+				escape = true
+				break loop
+			}
 			env.SetValueSlot(loopSlot, object.Smi(iVal))
+		}
+
+		if errObj != nil {
+			return errObj
+		}
+		if escape {
+			// 撤出原生路径：L4 只写 valueSlots，store/slots 仍是循环前状态，
+			// 直接把整条 for 语句交给 evalForStatement 重跑。
+			return evalForStatement(n, env)
 		}
 
 		// 循环退出：将 Smi Value 转换回 Object 并同步到 map + Object 槽位

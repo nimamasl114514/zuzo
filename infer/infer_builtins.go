@@ -126,7 +126,9 @@ func (i *Inferencer) builtinType(name string) (Type, bool) {
 	case "环境变量":
 		return TypeFunc{Params: []Type{TStr}, Return: TStr}, true
 	case "运行参数":
-		return TypeFunc{Params: []Type{TInt}, Return: TStr}, true
+		// 重载：无参 → 返回参数个数（整数）；运行参数(序号) → 返回该参数（字符串）
+		// 故签名放宽为可变参数 + 返回「任意」，由运行期 builtinCmdArgs 自行校验
+		return TypeFunc{Params: []Type{TInt}, Return: TAny, Variadic: true}, true
 
 	// --- 网络 ---
 	case "http获取":

@@ -15,17 +15,17 @@ import (
 
 func init() {
 	registerStringMethods(map[string]object.BuiltinFunction{
-		"是数字":   strIsDigit,
-		"是十进制":  strIsDecimal,
-		"是数值":   strIsNumeric,
-		"是字母":   strIsAlpha,
-		"是字母数字": strIsAlnum,
-		"是空白":   strIsSpace,
-		"是大写":   strIsUpper,
-		"是小写":   strIsLower,
-		"是标题":   strIsTitle,
-		"是可打印":  strIsPrintable,
-		"是标识符":  strIsIdentifier,
+		"是数字":    strIsDigit,
+		"是十进制":   strIsDecimal,
+		"是数值":    strIsNumeric,
+		"是字母":    strIsAlpha,
+		"是字母数字":  strIsAlnum,
+		"是空白":    strIsSpace,
+		"是大写":    strIsUpper,
+		"是小写":    strIsLower,
+		"是标题":    strIsTitle,
+		"是可打印":   strIsPrintable,
+		"是标识符":   strIsIdentifier,
 		"是ASCII": strIsASCII,
 	})
 }

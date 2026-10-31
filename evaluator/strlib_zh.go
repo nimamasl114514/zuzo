@@ -20,14 +20,14 @@ import (
 
 func init() {
 	registerStringMethods(map[string]object.BuiltinFunction{
-		"显示宽度":   strDisplayWidth,
-		"按宽度截断":  strTruncateWidth,
-		"按宽度填充":  strPadWidth,
-		"中文数字":   strParseChineseNumber,
-		"中文数字串":  strChineseNumber,
-		"包含中文":   strContainsHan,
-		"全角转半角":  builtinFullToHalf, // 复用 builtins_utf8.go
-		"半角转全角":  builtinHalfToFull, // 复用 builtins_utf8.go
+		"显示宽度":  strDisplayWidth,
+		"按宽度截断": strTruncateWidth,
+		"按宽度填充": strPadWidth,
+		"中文数字":  strParseChineseNumber,
+		"中文数字串": strChineseNumber,
+		"包含中文":  strContainsHan,
+		"全角转半角": builtinFullToHalf, // 复用 builtins_utf8.go
+		"半角转全角": builtinHalfToFull, // 复用 builtins_utf8.go
 	})
 }
 
