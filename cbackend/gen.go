@@ -46,6 +46,8 @@ type Gen struct {
 	ana    *analysis
 	cur    *fnInfo
 	updateLabels []string
+	defines  map[string]*ast.DefineStatement
+	defOrder []string
 }
 
 // Generate 把 zuzo 程序翻译成一份完整可编译的 C 源码。
@@ -56,8 +58,16 @@ func Generate(program *ast.Program, opt Options) (code string, err error) {
 		}
 	}()
 
-	g := &Gen{funcs: map[string]*fnInfo{}, opt: opt}
+	g := &Gen{funcs: map[string]*fnInfo{}, opt: opt, defines: map[string]*ast.DefineStatement{}}
 	g.ana = analyzeProgram(program)
+	for _, stmt := range program.Statements {
+		if d, ok := stmt.(*ast.DefineStatement); ok {
+			if _, dup := g.defines[d.Name]; !dup {
+				g.defines[d.Name] = d
+				g.defOrder = append(g.defOrder, d.Name)
+			}
+		}
+	}
 	for _, fi := range g.ana.All {
 		if fi.Name != "" {
 			if _, dup := g.funcs[fi.Name]; !dup {
@@ -80,6 +90,9 @@ func Generate(program *ast.Program, opt Options) (code string, err error) {
 	g.line("")
 
 	// 1) 前向声明
+	for _, name := range g.defOrder {
+		g.line("static ZVal zdef_%s(int argc, ZVal* argv, void* env);", sanitizeIdent(name))
+	}
 	for _, fi := range g.ana.All {
 		g.line("%s;", signature(fi))
 	}
@@ -106,7 +119,15 @@ func Generate(program *ast.Program, opt Options) (code string, err error) {
 		g.line("")
 	}
 
-	// 3) 函数定义
+	// 3) 定义（数据建模）构造函数
+	for _, name := range g.defOrder {
+		if err := g.genDefine(g.defines[name]); err != nil {
+			return "", err
+		}
+		g.line("")
+	}
+
+	// 4) 函数定义
 	for _, fi := range g.ana.All {
 		if err := g.genFunction(fi); err != nil {
 			return "", err
@@ -292,4 +313,23 @@ func sortedNames(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// genDefine 把「定义 X { 字段 = 默认值 }」编译成构造函数：返回一个哈希实例。
+func (g *Gen) genDefine(d *ast.DefineStatement) error {
+	g.line("static ZVal zdef_%s(int argc, ZVal* argv, void* env) {", sanitizeIdent(d.Name))
+	g.line("    (void)argc; (void)argv; (void)env;")
+	g.line("    ZVal zo = z_hash();")
+	g.pushScope()
+	for _, f := range d.Fields {
+		val, err := g.genExpr(f.Value)
+		if err != nil {
+			return err
+		}
+		g.line("    z_hash_set(zo, z_str(%s), %s);", cString(f.Name), val)
+	}
+	g.popScope()
+	g.line("    return zo;")
+	g.line("}")
+	return nil
 }

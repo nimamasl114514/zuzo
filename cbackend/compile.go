@@ -79,11 +79,56 @@ func ParseFile(path string) (*ast.Program, error) {
 	return prog, nil
 }
 
+// expandImports 编译期展开「导入」：把被导入文件的顶层语句并入当前程序。
+// 直接导入（无别名）合并语句；命名导入（导入 "x.hy" 为 m）暂不支持。
+func expandImports(prog *ast.Program, baseDir string, seen map[string]bool, depth int) error {
+	if depth > 32 {
+		return fmt.Errorf("导入嵌套过深（可能存在循环导入）")
+	}
+	var out []ast.Statement
+	for _, stmt := range prog.Statements {
+		imp, ok := stmt.(*ast.ImportStatement)
+		if !ok {
+			out = append(out, stmt)
+			continue
+		}
+		if imp.Alias != "" {
+			return fmt.Errorf("命名导入暂不支持（%s 为 %s），请改用直接导入", imp.Path, imp.Alias)
+		}
+		p := imp.Path
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(baseDir, p)
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return err
+		}
+		if seen[abs] {
+			continue
+		}
+		seen[abs] = true
+		sub, err := ParseFile(abs)
+		if err != nil {
+			return fmt.Errorf("导入 %s 失败: %w", imp.Path, err)
+		}
+		if err := expandImports(sub, filepath.Dir(abs), seen, depth+1); err != nil {
+			return err
+		}
+		out = append(out, sub.Statements...)
+	}
+	prog.Statements = out
+	return nil
+}
+
 // EmitC 解析 .hy 并生成 C 源码文本
 func EmitC(path string) (string, *ast.Program, error) {
 	prog, err := ParseFile(path)
 	if err != nil {
 		return "", nil, err
+	}
+	abs, _ := filepath.Abs(path)
+	if err := expandImports(prog, filepath.Dir(abs), map[string]bool{abs: true}, 0); err != nil {
+		return "", prog, err
 	}
 	code, err := Generate(prog, Options{SourcePath: path})
 	if err != nil {

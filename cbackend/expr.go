@@ -151,6 +151,9 @@ func (g *Gen) genIdent(name string) (string, error) {
 	if fi, ok := g.funcs[name]; ok {
 		return g.genClosureRef(fi)
 	}
+	if _, ok := g.defines[name]; ok {
+		return fmt.Sprintf("z_closure(zdef_%s, NULL, %s)", sanitizeIdent(name), cString(name)), nil
+	}
 	return "", fmt.Errorf("未定义的变量: %s", name)
 }
 
@@ -316,6 +319,9 @@ func (g *Gen) genCall(n *ast.CallExpression) (string, error) {
 	}
 	ident, isIdent := n.Function.(*ast.Identifier)
 	if isIdent {
+		if err := g.checkUnsupported(ident.Value); err != nil {
+			return "", err
+		}
 		if args, ok, err := g.genBuiltinCall(ident.Value, n); ok {
 			return args, err
 		}
@@ -328,6 +334,10 @@ func (g *Gen) genCall(n *ast.CallExpression) (string, error) {
 				return "", err
 			}
 			return g.genApply(f, n)
+		}
+		// 定义（数据建模）实例化：人()
+		if _, ok := g.defines[ident.Value]; ok {
+			return fmt.Sprintf("zdef_%s(0, NULL, NULL)", sanitizeIdent(ident.Value)), nil
 		}
 		// 具名函数直接调用
 		if fi, ok := g.funcs[ident.Value]; ok {

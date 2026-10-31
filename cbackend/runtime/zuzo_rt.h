@@ -176,6 +176,93 @@ ZVal zs_compare(ZVal a, ZVal b);
 ZVal zs_substr(ZVal s, ZVal start, ZVal stop);
 ZVal zs_lines(ZVal s);
 
+/* ── 数组/哈希内置 ─────────────────────────────────── */
+ZVal z_pop(ZVal arr);
+ZVal z_first(ZVal arr);
+ZVal z_last(ZVal arr);
+ZVal z_keys(ZVal h);
+ZVal z_get(ZVal h, ZVal k, ZVal defv, int hasDef);
+
+/* ── 数学内置 ─────────────────────────────────────── */
+ZVal z_abs(ZVal v);
+ZVal z_max2(ZVal a, ZVal b);
+ZVal z_min2(ZVal a, ZVal b);
+ZVal z_ceil(ZVal v);
+ZVal z_floor(ZVal v);
+ZVal z_round(ZVal v);
+ZVal z_pow(ZVal a, ZVal b);
+ZVal z_sqrt(ZVal v);
+ZVal z_sin(ZVal v);
+ZVal z_cos(ZVal v);
+ZVal z_log(ZVal v);
+ZVal z_rand(void);
+ZVal z_rand_int(ZVal lo, ZVal hi);
+
+/* ── 字符串全局 ───────────────────────────────────── */
+ZVal z_count_sub(ZVal v, ZVal sub);
+ZVal z_char_at(ZVal v, ZVal idx);
+ZVal z_fields(ZVal v);
+ZVal z_trim_chars(ZVal v, ZVal set);
+
+/* ── JSON ─────────────────────────────────────────── */
+ZVal z_json_parse(ZVal s);
+ZVal z_json_stringify(ZVal v);
+
+/* ── 文件 I/O ─────────────────────────────────────── */
+ZVal z_read_file(ZVal p);
+ZVal z_write_file(ZVal p, ZVal c);
+ZVal z_append_file(ZVal p, ZVal c);
+ZVal z_file_exists(ZVal p);
+ZVal z_create_file(ZVal p);
+ZVal z_delete_file(ZVal p);
+ZVal z_rename_file(ZVal a, ZVal b);
+
+/* ── 编码 ─────────────────────────────────────────── */
+ZVal z_base64_encode(ZVal v);
+ZVal z_base64_decode(ZVal v);
+ZVal z_hex_encode(ZVal v);
+ZVal z_hex_decode(ZVal v);
+ZVal z_url_encode(ZVal v);
+ZVal z_url_decode(ZVal v);
+
+/* ── 时间 ─────────────────────────────────────────── */
+ZVal z_unix_time(void);
+ZVal z_unix_milli(void);
+ZVal z_now(void);
+ZVal z_sleep_ms(ZVal v);
+
+/* ── 正则 ─────────────────────────────────────────── */
+ZVal z_regex_test(ZVal s, ZVal p);
+ZVal z_regex_match(ZVal s, ZVal p);
+ZVal z_regex_find_all(ZVal s, ZVal p);
+ZVal z_regex_replace(ZVal s, ZVal p, ZVal r);
+ZVal z_regex_split(ZVal s, ZVal p);
+ZVal z_regex_extract(ZVal s, ZVal p);
+
+/* ── 文本扩展（ASCII 语义）────────────────────────── */
+ZVal zs_capitalize(ZVal v);
+ZVal zs_title(ZVal v);
+ZVal zs_swapcase(ZVal v);
+ZVal zs_lstrip(ZVal v);
+ZVal zs_rstrip(ZVal v);
+ZVal zs_remove_prefix(ZVal v, ZVal p);
+ZVal zs_remove_suffix(ZVal v, ZVal p);
+ZVal zs_replace_n(ZVal v, ZVal o, ZVal n, ZVal cnt);
+ZVal zs_split_n(ZVal v, ZVal sep, ZVal n);
+ZVal zs_ljust(ZVal v, ZVal w, ZVal f);
+ZVal zs_rjust(ZVal v, ZVal w, ZVal f);
+ZVal zs_center(ZVal v, ZVal w, ZVal f);
+
+/* ── 摘要 ─────────────────────────────────────────── */
+ZVal z_md5(ZVal v);
+ZVal z_sha1(ZVal v);
+ZVal z_sha256(ZVal v);
+
+/* ── 格式化 / 目录 / 环境 ─────────────────────────── */
+ZVal z_format(int argc, ZVal* argv);
+ZVal z_read_dir(ZVal p);
+ZVal z_getenv(ZVal p);
+
 /* ── 诊断 ─────────────────────────────────────────────── */
 void z_die(const char* code, const char* msg);
 void z_check_arith(int overflow, const char* op);

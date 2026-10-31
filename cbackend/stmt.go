@@ -89,8 +89,7 @@ func (g *Gen) genStmt(stmt ast.Statement) error {
 		return nil
 
 	case *ast.DefineStatement:
-		g.unsupported(fmt.Sprintf("定义语句（%s）：计划第22轮", s.Name))
-		return nil
+		return nil // 已在 Generate 阶段生成构造函数
 
 	case *ast.TryCatchStatement:
 		return g.genTryCatch(s)

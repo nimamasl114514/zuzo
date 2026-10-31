@@ -1,0 +1,11 @@
+zuzo 1 真
+[a, b]
+{"a":[1,2],"b":1}
+aGVsbG8= hello
+4142 AB
+a+b%26c a b&c
+真 line1
+line2
+
+[1,"x",true,null]
+真 真
