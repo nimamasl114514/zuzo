@@ -9,9 +9,8 @@ import (
 	"zuzo/ast"
 )
 
-// genExpr 生成一个 C 表达式。返回的字符串可直接嵌入 C 语句。
-// 对于需要多步求值的表达式（if / 短路 / 哈希字面量），会先把语句写进当前块，
-// 再返回一个临时变量名 —— 即 ANF（A-normal form）降级。
+// genExpr 生成一个 C 表达式。需要多步求值的表达式（if / 短路 / 哈希字面量 /
+// 闭包构造）会先把语句写进当前块，再返回一个临时变量名（ANF 降级）。
 func (g *Gen) genExpr(e ast.Expression) (string, error) {
 	switch n := e.(type) {
 	case *ast.IntegerLiteral:
@@ -29,7 +28,6 @@ func (g *Gen) genExpr(e ast.Expression) (string, error) {
 	case *ast.FStringLiteral:
 		var parts []string
 		for _, p := range n.Parts {
-			// 字面文本段直接进 C 字符串，插值段先求值
 			if sl, ok := p.(*ast.StringLiteral); ok {
 				parts = append(parts, "z_str("+cString(sl.Value)+")")
 				continue
@@ -55,10 +53,7 @@ func (g *Gen) genExpr(e ast.Expression) (string, error) {
 		return "z_null()", nil
 
 	case *ast.Identifier:
-		if g.declared(n.Value) {
-			return cVarName(n.Value), nil
-		}
-		return "", fmt.Errorf("未定义的变量: %s", n.Value)
+		return g.genIdent(n.Value)
 
 	case *ast.PrefixExpression:
 		right, err := g.genExpr(n.Right)
@@ -91,12 +86,14 @@ func (g *Gen) genExpr(e ast.Expression) (string, error) {
 			}
 			items = append(items, v)
 		}
+		if len(items) == 0 {
+			return "z_array()", nil
+		}
 		return fmt.Sprintf("z_array_with(%d, (ZVal[]){%s})", len(items), strings.Join(items, ", ")), nil
 
 	case *ast.HashLiteral:
 		tmp := g.temp()
 		g.line("ZVal %s = z_hash();", tmp)
-		// map 遍历无序：按 String() 排序保证生成结果稳定（可复现构建）
 		keys := make([]ast.Expression, 0, len(n.Pairs))
 		for k := range n.Pairs {
 			keys = append(keys, k)
@@ -130,12 +127,63 @@ func (g *Gen) genExpr(e ast.Expression) (string, error) {
 		return g.genAssignExpr(n)
 
 	case *ast.FunctionLiteral:
-		return "", fmt.Errorf("匿名函数暂不支持（计划第22轮）：%s", n.String())
+		fi := g.ana.byNode[n]
+		if fi == nil {
+			return "", fmt.Errorf("内部错误：未分析到的函数字面量")
+		}
+		return g.genClosureRef(fi)
 	}
 	return "", fmt.Errorf("不支持的表达式: %T", e)
 }
 
-// genInfix 生成二元运算；短路逻辑就地展开成 if 语句
+// genIdent 变量/函数引用
+func (g *Gen) genIdent(name string) (string, error) {
+	if slot, ok := g.lookupVar(name); ok {
+		switch slot.kind {
+		case vPlain:
+			return cVarName(name), nil
+		case vBox:
+			return cVarName(name) + "->v", nil
+		case vCapture:
+			return "zenv->" + envFieldName(name) + "->v", nil
+		}
+	}
+	if fi, ok := g.funcs[name]; ok {
+		return g.genClosureRef(fi)
+	}
+	return "", fmt.Errorf("未定义的变量: %s", name)
+}
+
+// genClosureRef 构造一个函数值（闭包）
+func (g *Gen) genClosureRef(fi *fnInfo) (string, error) {
+	display := fi.Name
+	if display == "" {
+		display = "匿名"
+	}
+	if fi.EnvType == "" {
+		return fmt.Sprintf("z_closure(%s, NULL, %s)", fi.CName, cString(display)), nil
+	}
+	env := g.temp()
+	g.line("%s* %s = (%s*)z_new_env(sizeof(%s));", fi.EnvType, env, fi.EnvType, fi.EnvType)
+	for _, name := range fi.Captures {
+		slot, ok := g.lookupVar(name)
+		if !ok {
+			return "", fmt.Errorf("闭包捕获失败：找不到外层变量 %s", name)
+		}
+		switch slot.kind {
+		case vBox:
+			g.line("%s->%s = %s;", env, envFieldName(name), cVarName(name))
+		case vCapture:
+			g.line("%s->%s = zenv->%s;", env, envFieldName(name), envFieldName(name))
+		case vPlain:
+			// 兜底：未装箱的变量临时装箱（语义上不共享，正常分析路径不会走到）
+			g.line("%s->%s = z_box(%s);", env, envFieldName(name), cVarName(name))
+		}
+	}
+	return fmt.Sprintf("z_closure(%s, %s, %s)", fi.CName, env, cString(display)), nil
+}
+
+// genInfix 二元运算；短路逻辑就地展开
 func (g *Gen) genInfix(n *ast.InfixExpression) (string, error) {
 	if n.Operator == "并且" || n.Operator == "或者" {
 		return g.genShortCircuit(n)
@@ -180,7 +228,6 @@ func (g *Gen) genInfix(n *ast.InfixExpression) (string, error) {
 	return fmt.Sprintf("%s(%s, %s)", fn, left, right), nil
 }
 
-// genShortCircuit 把「并且 / 或者」展开为语句序列（保持短路语义）
 func (g *Gen) genShortCircuit(n *ast.InfixExpression) (string, error) {
 	left, err := g.genExpr(n.Left)
 	if err != nil {
@@ -204,7 +251,6 @@ func (g *Gen) genShortCircuit(n *ast.InfixExpression) (string, error) {
 	return tmp, nil
 }
 
-// genIfExpr 把 if 表达式降级为「临时变量 + if 语句」
 func (g *Gen) genIfExpr(n *ast.IfExpression) (string, error) {
 	cond, err := g.genExpr(n.Condition)
 	if err != nil {
@@ -238,7 +284,6 @@ func (g *Gen) genIfExpr(n *ast.IfExpression) (string, error) {
 	return tmp, nil
 }
 
-// genBlockValue 生成块并返回块的值（最后一条表达式语句）
 func (g *Gen) genBlockValue(b *ast.BlockStatement) (string, error) {
 	if b == nil || len(b.Statements) == 0 {
 		return "z_null()", nil
@@ -257,21 +302,73 @@ func (g *Gen) genBlockValue(b *ast.BlockStatement) (string, error) {
 	return "z_null()", nil
 }
 
-// genCall 函数调用：先查内置表，再查用户函数表
+// genCall 函数调用：内置 → 文本命名空间 → 具名直接调 → 函数值调用
 func (g *Gen) genCall(n *ast.CallExpression) (string, error) {
-	ident, ok := n.Function.(*ast.Identifier)
-	if !ok {
-		return "", fmt.Errorf("仅支持按名字调用函数: %s", n.Function.String())
+	// 文本.成员(...)
+	if idx, ok := n.Function.(*ast.IndexExpression); ok {
+		if left, ok := idx.Left.(*ast.Identifier); ok && left.Value == "文本" {
+			if lit, ok := idx.Index.(*ast.StringLiteral); ok {
+				if v, hit, err := g.genTextBuiltin(lit.Value, n); hit {
+					return v, err
+				}
+			}
+		}
 	}
-	// 内置函数
-	if args, ok, err := g.genBuiltinCall(ident.Value, n); ok {
-		return args, err
-	}
-	// 用户函数
-	fi, exists := g.funcs[ident.Value]
-	if !exists {
+	ident, isIdent := n.Function.(*ast.Identifier)
+	if isIdent {
+		if args, ok, err := g.genBuiltinCall(ident.Value, n); ok {
+			return args, err
+		}
+		// 变量里存的是函数 → 走 z_call
+		if slot, ok := g.lookupVar(ident.Value); ok {
+			fnRef := ident.Value
+			_ = slot
+			f, err := g.genIdent(fnRef)
+			if err != nil {
+				return "", err
+			}
+			return g.genApply(f, n)
+		}
+		// 具名函数直接调用
+		if fi, ok := g.funcs[ident.Value]; ok {
+			var args []string
+			for _, a := range n.Arguments {
+				v, err := g.genExpr(a)
+				if err != nil {
+					return "", err
+				}
+				args = append(args, v)
+			}
+			if len(args) != len(fi.Node.Parameters) {
+				return "", fmt.Errorf("%s() 参数数量不匹配: 期望 %d，得到 %d",
+					ident.Value, len(fi.Node.Parameters), len(args))
+			}
+			envArg := "NULL"
+			// 嵌套具名函数若带捕获，需要显式构造环境
+			if len(fi.Captures) > 0 {
+				ref, err := g.genClosureRef(fi)
+				if err != nil {
+					return "", err
+				}
+				envArg = "z_fn_env(" + ref + ")"
+			}
+			if len(args) == 0 {
+				return fmt.Sprintf("%s(0, NULL, %s)", fi.CName, envArg), nil
+			}
+			return fmt.Sprintf("%s(%d, (ZVal[]){%s}, %s)", fi.CName, len(args), strings.Join(args, ", "), envArg), nil
+		}
 		return "", fmt.Errorf("未定义的函数: %s", ident.Value)
 	}
+
+	f, err := g.genExpr(n.Function)
+	if err != nil {
+		return "", err
+	}
+	return g.genApply(f, n)
+}
+
+// genApply 对函数值发起调用
+func (g *Gen) genApply(fnRef string, n *ast.CallExpression) (string, error) {
 	var args []string
 	for _, a := range n.Arguments {
 		v, err := g.genExpr(a)
@@ -280,26 +377,40 @@ func (g *Gen) genCall(n *ast.CallExpression) (string, error) {
 		}
 		args = append(args, v)
 	}
-	if len(args) != fi.Arity {
-		return "", fmt.Errorf("%s() 参数数量不匹配: 期望 %d，得到 %d", ident.Value, fi.Arity, len(args))
+	if len(args) == 0 {
+		return fmt.Sprintf("z_call(%s, 0, NULL)", fnRef), nil
 	}
-	return fmt.Sprintf("%s(%s)", cFuncName(ident.Value), strings.Join(args, ", ")), nil
+	return fmt.Sprintf("z_call(%s, %d, (ZVal[]){%s})", fnRef, len(args), strings.Join(args, ", ")), nil
 }
 
-// genAssignExpr 赋值：变量赋值 / 下标赋值
+// genAssignExpr 赋值：变量 / 下标
 func (g *Gen) genAssignExpr(n *ast.AssignExpression) (string, error) {
 	if n.Name != nil {
 		val, err := g.genExpr(n.Value)
 		if err != nil {
 			return "", err
 		}
-		if !g.declared(n.Name.Value) {
-			// 与解释器一致：赋值即定义（env.Set 语义）
-			g.declare(n.Name.Value)
-			g.line("ZVal %s = %s;", cVarName(n.Name.Value), val)
-			return cVarName(n.Name.Value), nil
+		if slot, ok := g.lookupVar(n.Name.Value); ok {
+			switch slot.kind {
+			case vPlain:
+				g.line("%s = %s;", cVarName(n.Name.Value), val)
+				return cVarName(n.Name.Value), nil
+			case vBox:
+				g.line("%s->v = %s;", cVarName(n.Name.Value), val)
+				return cVarName(n.Name.Value) + "->v", nil
+			case vCapture:
+				g.line("zenv->%s->v = %s;", envFieldName(n.Name.Value), val)
+				return "zenv->" + envFieldName(n.Name.Value) + "->v", nil
+			}
 		}
-		g.line("%s = %s;", cVarName(n.Name.Value), val)
+		// 与解释器一致：赋值即定义
+		if g.boxedBy(g.cur, n.Name.Value) {
+			g.setVar(n.Name.Value, varSlot{kind: vBox})
+			g.line("ZBox* %s = z_box(%s);", cVarName(n.Name.Value), val)
+			return cVarName(n.Name.Value) + "->v", nil
+		}
+		g.setVar(n.Name.Value, varSlot{kind: vPlain})
+		g.line("ZVal %s = %s;", cVarName(n.Name.Value), val)
 		return cVarName(n.Name.Value), nil
 	}
 	if n.IndexTarget != nil {
@@ -367,14 +478,7 @@ func cFloat(f float64) string {
 	return s
 }
 
-type exprList []ast.Expression
-
-func (l exprList) Len() int           { return len(l) }
-func (l exprList) Less(i, j int) bool { return l[i].String() < l[j].String() }
-func (l exprList) Swap(i, j int)      { l[i], l[j] = l[j], l[i] }
-
 func sortExprs(es []ast.Expression) {
-	// 简单插入排序，避免额外依赖
 	for i := 1; i < len(es); i++ {
 		for j := i; j > 0 && es[j].String() < es[j-1].String(); j-- {
 			es[j], es[j-1] = es[j-1], es[j]

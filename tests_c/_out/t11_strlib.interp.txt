@@ -1,0 +1,12 @@
+HELLO
+hello
+hi
+bbb
+[a, b, c]
+ababab
+2
+真
+真 真
+-1
+好世
+[a, b, c]

@@ -65,9 +65,22 @@ static int64_t z_utf8_len(const char* s, int64_t bytes) {
  * 诊断
  * ══════════════════════════════════════════════════════════ */
 
+ZTryFrame* z_try_top = NULL;
+ZVal z_error_value;
+
+ZVal z_error_take(void) { return z_error_value; }
+
 void z_die(const char* code, const char* msg) {
-    if (code && code[0]) fprintf(stderr, "错误 %s: %s\n", code, msg);
-    else                  fprintf(stderr, "错误: %s\n", msg);
+    char buf[1024];
+    if (code && code[0]) snprintf(buf, sizeof(buf), "错误 %s: %s", code, msg);
+    else                 snprintf(buf, sizeof(buf), "错误: %s", msg);
+    if (z_try_top != NULL) {
+        /* 有 `执行/遇到` 帧：抛成错误对象并跳转，不终止进程 */
+        z_error_value = z_str(buf);
+        longjmp(z_try_top->buf, 1);
+    }
+    fputs(buf, stderr);
+    fputc('\n', stderr);
     exit(1);
 }
 
@@ -579,6 +592,40 @@ ZVal z_join(ZVal arr, ZVal sep) {
     return z_str_take(b.data, b.len);
 }
 
+/* ══════════════════════════════════════════════════════════
+ * 闭包与函数值
+ * ══════════════════════════════════════════════════════════ */
+
+ZBox* z_box(ZVal v) {
+    ZBox* b = (ZBox*)z_alloc(sizeof(ZBox));
+    b->v = v;
+    return b;
+}
+
+void* z_new_env(size_t n) {
+    if (n < sizeof(void*)) n = sizeof(void*);
+    return z_alloc(n);
+}
+
+ZVal z_closure(ZFnPtr fn, void* env, const char* name) {
+    ZFunc* f = (ZFunc*)z_alloc(sizeof(ZFunc));
+    f->fn = fn;
+    f->env = env;
+    f->name = name;
+    ZVal v; v.kind = ZK_FUNC; v.as.fn = f; return v;
+}
+
+void* z_fn_env(ZVal f) {
+    if (f.kind != ZK_FUNC) return NULL;
+    return f.as.fn->env;
+}
+
+ZVal z_call(ZVal f, int argc, ZVal* argv) {
+    if (f.kind != ZK_FUNC) z_die("E215", "调用目标不是函数");
+    if (!f.as.fn->fn) z_die("E215", "函数指针为空");
+    return f.as.fn->fn(argc, argv, f.as.fn->env);
+}
+
 /* f-string 拼接：各段按 Inspect 口径转字符串后连接 */
 ZVal z_concat(int n, ZVal* parts) {
     ZBuf b; buf_init(&b);
@@ -600,4 +647,195 @@ ZVal z_contains(ZVal container, ZVal v) {
     if (container.kind == ZK_HASH) return z_bool(z_hash_find(container.as.h, v) >= 0);
     z_die("E214", "包含() 不支持该类型");
     return z_null();
+}
+
+/* ══════════════════════════════════════════════════════════
+ * 文本命名空间（核心子集 · ASCII 语义，UTF-8 字节安全）
+ * ══════════════════════════════════════════════════════════ */
+
+static ZStr* zs_arg(ZVal v, const char* fn) {
+    if (v.kind != ZK_STR) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%s() 参数必须是字符串", fn);
+        z_die("E216", buf);
+    }
+    return v.as.s;
+}
+
+static int64_t zs_byte_to_rune_index(const char* s, int64_t bytes, int64_t bytePos) {
+    return z_utf8_len(s, bytePos);
+}
+
+ZVal zs_upper(ZVal v) {
+    ZStr* s = zs_arg(v, "大写");
+    char* p = (char*)z_alloc((size_t)s->len + 1);
+    for (int64_t i = 0; i < s->len; i++) {
+        char c = s->data[i];
+        p[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+    }
+    p[s->len] = 0;
+    return z_str_take(p, s->len);
+}
+
+ZVal zs_lower(ZVal v) {
+    ZStr* s = zs_arg(v, "小写");
+    char* p = (char*)z_alloc((size_t)s->len + 1);
+    for (int64_t i = 0; i < s->len; i++) {
+        char c = s->data[i];
+        p[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    p[s->len] = 0;
+    return z_str_take(p, s->len);
+}
+
+static int zs_is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+}
+
+ZVal zs_trim(ZVal v) {
+    ZStr* s = zs_arg(v, "去空白");
+    int64_t a = 0, b = s->len;
+    while (a < b && zs_is_space(s->data[a])) a++;
+    while (b > a && zs_is_space(s->data[b - 1])) b--;
+    return z_str_len(s->data + a, b - a);
+}
+
+ZVal zs_replace(ZVal v, ZVal oldv, ZVal newv) {
+    ZStr* s = zs_arg(v, "替换");
+    ZStr* o = zs_arg(oldv, "替换");
+    ZStr* n = zs_arg(newv, "替换");
+    if (o->len == 0) return v;
+    ZBuf b; buf_init(&b);
+    int64_t i = 0;
+    while (i < s->len) {
+        if (i + o->len <= s->len && memcmp(s->data + i, o->data, (size_t)o->len) == 0) {
+            buf_putn(&b, n->data, n->len);
+            i += o->len;
+        } else {
+            buf_putc(&b, s->data[i]);
+            i++;
+        }
+    }
+    return z_str_take(b.data, b.len);
+}
+
+ZVal zs_split(ZVal v, ZVal sepv) {
+    ZStr* s = zs_arg(v, "分割");
+    ZStr* sep = zs_arg(sepv, "分割");
+    ZVal out = z_array();
+    if (sep->len == 0) {
+        /* 空分隔符：逐字符（按 UTF-8 码点）切 */
+        int64_t i = 0;
+        while (i < s->len) {
+            int64_t w = 1;
+            unsigned char c = (unsigned char)s->data[i];
+            if (c >= 0xF0) w = 4; else if (c >= 0xE0) w = 3; else if (c >= 0xC0) w = 2;
+            z_array_push(out, z_str_len(s->data + i, w));
+            i += w;
+        }
+        return out;
+    }
+    int64_t start = 0, i = 0;
+    while (i < s->len) {
+        if (i + sep->len <= s->len && memcmp(s->data + i, sep->data, (size_t)sep->len) == 0) {
+            z_array_push(out, z_str_len(s->data + start, i - start));
+            i += sep->len;
+            start = i;
+        } else {
+            i++;
+        }
+    }
+    z_array_push(out, z_str_len(s->data + start, s->len - start));
+    return out;
+}
+
+ZVal zs_join_arr(ZVal arr, ZVal sepv) { return z_join(arr, sepv); }
+
+ZVal zs_repeat(ZVal v, ZVal nv) {
+    ZStr* s = zs_arg(v, "重复");
+    int64_t n = (nv.kind == ZK_INT) ? nv.as.i : 0;
+    if (n <= 0) return z_str_len("", 0);
+    int64_t total = s->len * n;
+    char* p = (char*)z_alloc((size_t)total + 1);
+    for (int64_t k = 0; k < n; k++) memcpy(p + k * s->len, s->data, (size_t)s->len);
+    p[total] = 0;
+    return z_str_take(p, total);
+}
+
+ZVal zs_find(ZVal v, ZVal subv) {
+    ZStr* s = zs_arg(v, "查找");
+    ZStr* sub = zs_arg(subv, "查找");
+    if (sub->len == 0) return z_int(0);
+    for (int64_t i = 0; i + sub->len <= s->len; i++) {
+        if (memcmp(s->data + i, sub->data, (size_t)sub->len) == 0)
+            return z_int(zs_byte_to_rune_index(s->data, s->len, i));
+    }
+    return z_int(-1);
+}
+
+ZVal zs_contains(ZVal v, ZVal subv) {
+    ZVal r = zs_find(v, subv);
+    return z_bool(r.as.i >= 0);
+}
+
+ZVal zs_starts(ZVal v, ZVal pv) {
+    ZStr* s = zs_arg(v, "前缀");
+    ZStr* p = zs_arg(pv, "前缀");
+    if (p->len > s->len) return z_bool(0);
+    return z_bool(memcmp(s->data, p->data, (size_t)p->len) == 0);
+}
+
+ZVal zs_ends(ZVal v, ZVal pv) {
+    ZStr* s = zs_arg(v, "后缀");
+    ZStr* p = zs_arg(pv, "后缀");
+    if (p->len > s->len) return z_bool(0);
+    return z_bool(memcmp(s->data + (s->len - p->len), p->data, (size_t)p->len) == 0);
+}
+
+ZVal zs_compare(ZVal a, ZVal b) {
+    ZStr* x = zs_arg(a, "比较");
+    ZStr* y = zs_arg(b, "比较");
+    return z_int(z_str_cmp(x, y) < 0 ? -1 : (z_str_cmp(x, y) > 0 ? 1 : 0));
+}
+
+ZVal zs_substr(ZVal v, ZVal startv, ZVal stopv) {
+    ZStr* s = zs_arg(v, "子串");
+    int64_t runes = z_utf8_len(s->data, s->len);
+    int64_t start = (startv.kind == ZK_INT) ? startv.as.i : 0;
+    int64_t stop = (stopv.kind == ZK_INT) ? stopv.as.i : runes;
+    if (start < 0) start = 0;
+    if (stop > runes) stop = runes;
+    if (start >= stop) return z_str_len("", 0);
+    /* rune 索引 → 字节索引 */
+    int64_t byteStart = -1, byteStop = -1, ri = 0, bi = 0;
+    if (start == 0) byteStart = 0;
+    while (bi < s->len && (byteStart < 0 || byteStop < 0)) {
+        if (ri == start) byteStart = bi;
+        if (ri == stop) { byteStop = bi; break; }
+        unsigned char c = (unsigned char)s->data[bi];
+        int64_t w = 1;
+        if (c >= 0xF0) w = 4; else if (c >= 0xE0) w = 3; else if (c >= 0xC0) w = 2;
+        bi += w; ri++;
+    }
+    if (byteStart < 0) byteStart = s->len;
+    if (byteStop < 0) byteStop = s->len;
+    return z_str_len(s->data + byteStart, byteStop - byteStart);
+}
+
+ZVal zs_lines(ZVal v) {
+    ZStr* s = zs_arg(v, "按行分割");
+    ZVal out = z_array();
+    int64_t start = 0, i = 0;
+    while (i < s->len) {
+        if (s->data[i] == '\n' || s->data[i] == '\r') {
+            z_array_push(out, z_str_len(s->data + start, i - start));
+            if (s->data[i] == '\r' && i + 1 < s->len && s->data[i + 1] == '\n') i++;
+            i++;
+            start = i;
+        } else {
+            i++;
+        }
+    }
+    if (start < s->len) z_array_push(out, z_str_len(s->data + start, s->len - start));
+    return out;
 }

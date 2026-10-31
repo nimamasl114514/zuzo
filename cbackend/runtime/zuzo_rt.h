@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <setjmp.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,7 +34,7 @@ typedef struct ZArr   ZArr;
 typedef struct ZHash  ZHash;
 typedef struct ZFunc  ZFunc;
 
-typedef ZVal (*ZNativeFn)(int argc, ZVal* argv);
+typedef ZVal (*ZFnPtr)(int argc, ZVal* argv, void* env);
 
 /* 值：16 字节（kind + union） */
 struct ZVal {
@@ -73,10 +74,15 @@ struct ZHash {
 };
 
 struct ZFunc {
-    ZNativeFn   fn;
+    ZFnPtr      fn;
     void*       env;
     const char* name;
 };
+
+/* 闭包捕获的堆变量（共享可变状态） */
+typedef struct ZBox {
+    ZVal v;
+} ZBox;
 
 /* ── 构造器 ───────────────────────────────────────────── */
 ZVal z_null(void);
@@ -134,8 +140,41 @@ ZVal z_join(ZVal arr, ZVal sep);
 ZVal z_concat(int n, ZVal* parts);
 ZVal z_contains(ZVal container, ZVal v);
 
+/* ── 闭包与函数值 ─────────────────────────────── */
+ZBox* z_box(ZVal v);
+void* z_new_env(size_t n);
+ZVal  z_closure(ZFnPtr fn, void* env, const char* name);
+void* z_fn_env(ZVal f);
+ZVal  z_call(ZVal f, int argc, ZVal* argv);
+
 /* ── 运行时初始化（Windows 下 stdout 置二进制模式，对齐解释器 LF）── */
 void z_rt_init(void);
+
+/* ── 错误捕获（执行/遇到）───────────────────────────── */
+typedef struct ZTryFrame {
+    jmp_buf buf;
+    struct ZTryFrame* prev;
+} ZTryFrame;
+
+extern ZTryFrame* z_try_top;
+extern ZVal z_error_value;
+ZVal z_error_take(void);
+
+/* ── 文本命名空间（第22轮核心子集）─────────────── */
+ZVal zs_upper(ZVal s);
+ZVal zs_lower(ZVal s);
+ZVal zs_trim(ZVal s);
+ZVal zs_replace(ZVal s, ZVal oldv, ZVal newv);
+ZVal zs_split(ZVal s, ZVal sep);
+ZVal zs_join_arr(ZVal arr, ZVal sep);
+ZVal zs_repeat(ZVal s, ZVal n);
+ZVal zs_find(ZVal s, ZVal sub);
+ZVal zs_contains(ZVal s, ZVal sub);
+ZVal zs_starts(ZVal s, ZVal prefix);
+ZVal zs_ends(ZVal s, ZVal suffix);
+ZVal zs_compare(ZVal a, ZVal b);
+ZVal zs_substr(ZVal s, ZVal start, ZVal stop);
+ZVal zs_lines(ZVal s);
 
 /* ── 诊断 ─────────────────────────────────────────────── */
 void z_die(const char* code, const char* msg);

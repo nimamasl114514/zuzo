@@ -1,0 +1,26 @@
+[
+  {
+    "case": "bench_loop",
+    "rounds": 5,
+    "interp_ms": 29.27,
+    "c_ms": 29.81,
+    "speedup": 0.98,
+    "same_output": true
+  },
+  {
+    "case": "bench_fib",
+    "rounds": 5,
+    "interp_ms": 352.33,
+    "c_ms": 23.06,
+    "speedup": 15.28,
+    "same_output": true
+  },
+  {
+    "case": "bench_sort",
+    "rounds": 5,
+    "interp_ms": 41.78,
+    "c_ms": 9.04,
+    "speedup": 4.62,
+    "same_output": true
+  }
+]

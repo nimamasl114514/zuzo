@@ -1,9 +1,6 @@
-// Package cbackend 把 zuzo AST 翻译成 C 源码（第21轮 · C 后端）。
+// Package cbackend 把 zuzo AST 翻译成 C 源码（C 后端）。
 //
-// 设计口径（见 交付-累计.md 第21轮任务总计划）：
-//   - 值模型统一走 ZVal（cbackend/runtime/zuzo_rt.h），语义对齐解释器；
-//   - 表达式降级：if 表达式 / 短路逻辑 / 哈希字面量提升为「语句 + 临时量」；
-//   - 函数签名按编译期参数个数生成（本轮不支持把函数当值传递）。
+// 第22轮增强：闭包捕获（自由变量分析 → 堆环境 → 函数值调用）。
 package cbackend
 
 import (
@@ -17,15 +14,22 @@ import (
 
 // Options 生成选项
 type Options struct {
-	SourcePath string // 源文件路径（仅用于注释与错误信息）
-	KeepTemp   bool   // 保留中间产物（调试用）
+	SourcePath string
+	KeepTemp   bool
 }
 
-// funcInfo 编译期函数表项
-type funcInfo struct {
-	Name  string
-	Arity int
-	Node  *ast.FunctionLiteral
+// varKind 变量在 C 侧的存储形态
+type varKind int
+
+const (
+	vPlain   varKind = iota // ZVal
+	vBox                    // ZBox*（被内层闭包捕获）
+	vCapture                // 通过 env 结构体间接访问的 ZBox*
+)
+
+type varSlot struct {
+	kind    varKind
+	envType string // vCapture 时所属 env 结构体
 }
 
 // Gen C 代码生成器
@@ -33,21 +37,34 @@ type Gen struct {
 	buf    bytes.Buffer
 	indent int
 	tmpSeq int
-	funcs  map[string]*funcInfo
+	labelSeq int
+	funcs  map[string]*fnInfo
 	order  []string
-	scopes []map[string]bool
+	scopes []map[string]varSlot
 	errs   []string
 	opt    Options
-	// updateLabels 循环栈：非空 = 当前循环带 update 标签（for），空串 = 无 update（while/遍历）
+	ana    *analysis
+	cur    *fnInfo
 	updateLabels []string
-	labelSeq     int
 }
 
 // Generate 把 zuzo 程序翻译成一份完整可编译的 C 源码。
-func Generate(program *ast.Program, opt Options) (string, error) {
-	g := &Gen{funcs: map[string]*funcInfo{}, opt: opt}
-	if err := g.collectFunctions(program); err != nil {
-		return "", err
+func Generate(program *ast.Program, opt Options) (code string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("C 后端内部错误: %v", r)
+		}
+	}()
+
+	g := &Gen{funcs: map[string]*fnInfo{}, opt: opt}
+	g.ana = analyzeProgram(program)
+	for _, fi := range g.ana.All {
+		if fi.Name != "" {
+			if _, dup := g.funcs[fi.Name]; !dup {
+				g.funcs[fi.Name] = fi
+				g.order = append(g.order, fi.Name)
+			}
+		}
 	}
 
 	g.line("/* ────────────────────────────────────────────────────────────")
@@ -62,33 +79,51 @@ func Generate(program *ast.Program, opt Options) (string, error) {
 	g.line("#include <stdint.h>")
 	g.line("")
 
-	// 前向声明（支持递归与互相调用）
-	for _, name := range g.order {
-		fi := g.funcs[name]
+	// 1) 前向声明
+	for _, fi := range g.ana.All {
 		g.line("%s;", signature(fi))
 	}
-	if len(g.order) > 0 {
+	if len(g.ana.All) > 0 {
 		g.line("")
 	}
 
-	// 函数定义
-	for _, name := range g.order {
-		fi := g.funcs[name]
+	// 2) 闭包环境结构体
+	for _, fi := range g.ana.All {
+		if fi.EnvType == "" {
+			continue
+		}
+		if len(fi.Captures) == 0 {
+			g.line("typedef struct { int unused; } %s;", fi.EnvType)
+			continue
+		}
+		var fields []string
+		for _, name := range fi.Captures {
+			fields = append(fields, fmt.Sprintf("ZBox* v_%s;", sanitizeIdent(name)))
+		}
+		g.line("typedef struct { %s } %s;", strings.Join(fields, " "), fi.EnvType)
+	}
+	if len(g.ana.All) > 0 {
+		g.line("")
+	}
+
+	// 3) 函数定义
+	for _, fi := range g.ana.All {
 		if err := g.genFunction(fi); err != nil {
 			return "", err
 		}
 		g.line("")
 	}
 
-	// main：顶层语句
+	// 4) main：顶层语句
 	g.line("int main(int argc, char** argv) {")
 	g.line("    (void)argc; (void)argv;")
 	g.line("    z_rt_init();")
 	g.pushScope()
+	g.cur = nil
 	for _, stmt := range program.Statements {
 		if fs, ok := stmt.(*ast.ExpressionStatement); ok {
 			if fl, ok := fs.Expression.(*ast.FunctionLiteral); ok && fl.Name != "" {
-				continue
+				continue // 具名函数已单独生成
 			}
 		}
 		if err := g.genStmt(stmt); err != nil {
@@ -105,22 +140,13 @@ func Generate(program *ast.Program, opt Options) (string, error) {
 	return g.buf.String(), nil
 }
 
-func filepathToSlash(p string) string {
-	return strings.ReplaceAll(p, "\\", "/")
+func filepathToSlash(p string) string { return strings.ReplaceAll(p, "\\", "/") }
+
+// signature 统一函数签名：参数走 argv，闭包环境走 env
+func signature(fi *fnInfo) string {
+	return fmt.Sprintf("static ZVal %s(int argc, ZVal* argv, void* env)", fi.CName)
 }
 
-func signature(fi *funcInfo) string {
-	var params []string
-	for i := 0; i < fi.Arity; i++ {
-		params = append(params, fmt.Sprintf("ZVal a%d", i))
-	}
-	if len(params) == 0 {
-		params = append(params, "void")
-	}
-	return fmt.Sprintf("static ZVal %s(%s)", cFuncName(fi.Name), strings.Join(params, ", "))
-}
-
-// cFuncName 把 zuzo 函数名映射为 C 标识符（保留中文，前缀防冲突）
 func cFuncName(name string) string {
 	if name == "" {
 		return "zf_anonymous"
@@ -128,19 +154,17 @@ func cFuncName(name string) string {
 	return "zf_" + sanitizeIdent(name)
 }
 
-// cVarName 把 zuzo 变量名映射为 C 标识符
-func cVarName(name string) string {
-	return "zv_" + sanitizeIdent(name)
-}
+func cVarName(name string) string { return "zv_" + sanitizeIdent(name) }
 
-// sanitizeIdent 去掉 C 标识符不允许的字符
+func envFieldName(name string) string { return "v_" + sanitizeIdent(name) }
+
 func sanitizeIdent(name string) string {
 	var b strings.Builder
 	for _, r := range name {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
 			b.WriteRune(r)
-		case r > 127: // 中文等 UTF-8 标识符直接保留（gcc extended identifiers）
+		case r > 127:
 			b.WriteRune(r)
 		default:
 			b.WriteRune('_')
@@ -156,43 +180,32 @@ func sanitizeIdent(name string) string {
 	return s
 }
 
-func (g *Gen) collectFunctions(program *ast.Program) error {
-	var walk func(stmts []ast.Statement) error
-	walk = func(stmts []ast.Statement) error {
-		for _, stmt := range stmts {
-			switch s := stmt.(type) {
-			case *ast.ExpressionStatement:
-				if fl, ok := s.Expression.(*ast.FunctionLiteral); ok && fl.Name != "" {
-					if _, dup := g.funcs[fl.Name]; !dup {
-						g.funcs[fl.Name] = &funcInfo{Name: fl.Name, Arity: len(fl.Parameters), Node: fl}
-						g.order = append(g.order, fl.Name)
-					}
-				}
-			}
-		}
-		return nil
-	}
-	if err := walk(program.Statements); err != nil {
-		return err
-	}
-	sort.SliceStable(g.order, func(i, j int) bool { return false }) // 保持声明顺序
-	return nil
-}
+// genFunction 生成一个函数的 C 实现
+func (g *Gen) genFunction(fi *fnInfo) error {
+	prev := g.cur
+	g.cur = fi
+	defer func() { g.cur = prev }()
 
-// genFunction 生成一个 zuzo 函数的 C 实现
-func (g *Gen) genFunction(fi *funcInfo) error {
 	g.line("%s {", signature(fi))
 	g.pushScope()
+	if fi.EnvType != "" {
+		g.line("    %s* zenv = (%s*)env;", fi.EnvType, fi.EnvType)
+		g.line("    (void)zenv;")
+	}
+	g.line("    (void)argc;")
+	// 参数：从 argv 取
 	for i, p := range fi.Node.Parameters {
-		g.declare(p.Value)
-		g.line("    (void)a%d;", i) // 防止未使用告警（真实使用在下方别名）
-		g.line("    ZVal %s = a%d;", cVarName(p.Value), i)
+		g.line("    ZVal %s = argv[%d];", cVarName(p.Value), i)
+		g.setVar(p.Value, varSlot{kind: vPlain})
+	}
+	// 捕获变量：登记为 vCapture，引用时走 zenv->v_x->v
+	for _, name := range fi.Captures {
+		g.setVar(name, varSlot{kind: vCapture, envType: fi.EnvType})
 	}
 
 	body := fi.Node.Body.Statements
 	for i, stmt := range body {
 		isLast := i == len(body)-1
-		// 函数体最后一条表达式语句 = 隐式返回值
 		if isLast {
 			if es, ok := stmt.(*ast.ExpressionStatement); ok {
 				val, err := g.genExpr(es.Expression)
@@ -228,7 +241,7 @@ func (g *Gen) line(format string, args ...any) {
 }
 
 func (g *Gen) pushScope() {
-	g.scopes = append(g.scopes, map[string]bool{})
+	g.scopes = append(g.scopes, map[string]varSlot{})
 	g.indent++
 }
 
@@ -237,27 +250,46 @@ func (g *Gen) popScope() {
 	g.indent--
 }
 
-func (g *Gen) declare(name string) {
+func (g *Gen) setVar(name string, slot varSlot) {
 	if len(g.scopes) == 0 {
 		return
 	}
-	g.scopes[len(g.scopes)-1][name] = true
+	g.scopes[len(g.scopes)-1][name] = slot
 }
 
-func (g *Gen) declared(name string) bool {
+func (g *Gen) lookupVar(name string) (varSlot, bool) {
 	for i := len(g.scopes) - 1; i >= 0; i-- {
-		if g.scopes[i][name] {
-			return true
+		if s, ok := g.scopes[i][name]; ok {
+			return s, true
 		}
 	}
-	return false
+	return varSlot{}, false
 }
+
+func (g *Gen) declare(name string) { g.setVar(name, varSlot{kind: vPlain}) }
 
 func (g *Gen) temp() string {
 	g.tmpSeq++
 	return fmt.Sprintf("zt%d", g.tmpSeq)
 }
 
-func (g *Gen) unsupported(what string) {
-	g.errs = append(g.errs, what)
+func (g *Gen) unsupported(what string) { g.errs = append(g.errs, what) }
+
+// boxedBy 判断某变量是否被当前函数的子闭包捕获（需要在声明处装箱）
+func (g *Gen) boxedBy(fi *fnInfo, name string) bool {
+	if fi == nil {
+		return false
+	}
+	m := g.ana.Boxed[fi]
+	return m != nil && m[name]
+}
+
+// sortedNames 稳定排序，保证生成结果可复现
+func sortedNames(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

@@ -93,10 +93,47 @@ func (g *Gen) genStmt(stmt ast.Statement) error {
 		return nil
 
 	case *ast.TryCatchStatement:
-		g.unsupported("执行/遇到 错误处理：计划第22轮")
-		return nil
+		return g.genTryCatch(s)
 	}
 	return fmt.Errorf("不支持的语句: %T", stmt)
+}
+
+// genTryCatch 「执行 { } 遇到 err { }」→ setjmp/longjmp
+func (g *Gen) genTryCatch(s *ast.TryCatchStatement) error {
+	id := g.temp()
+	g.line("{")
+	g.line("    ZTryFrame %s;", id)
+	g.line("    %s.prev = z_try_top;", id)
+	g.line("    z_try_top = &%s;", id)
+	g.line("    if (setjmp(%s.buf) == 0) {", id)
+	g.pushScope()
+	if s.Body != nil {
+		for _, stmt := range s.Body.Statements {
+			if err := g.genStmt(stmt); err != nil {
+				return err
+			}
+		}
+	}
+	g.popScope()
+	g.line("        z_try_top = %s.prev;", id)
+	g.line("    } else {")
+	g.line("        z_try_top = %s.prev;", id)
+	g.pushScope()
+	if s.ErrVar != "" {
+		g.setVar(s.ErrVar, varSlot{kind: vPlain})
+		g.line("        ZVal %s = z_error_take();", cVarName(s.ErrVar))
+	}
+	if s.Handler != nil {
+		for _, stmt := range s.Handler.Statements {
+			if err := g.genStmt(stmt); err != nil {
+				return err
+			}
+		}
+	}
+	g.popScope()
+	g.line("    }")
+	g.line("}")
+	return nil
 }
 
 func (g *Gen) genLet(s *ast.LetStatement) error {
@@ -105,8 +142,21 @@ func (g *Gen) genLet(s *ast.LetStatement) error {
 		return err
 	}
 	name := s.Name.Value
-	if g.declared(name) {
-		g.line("%s = %s;", cVarName(name), val)
+	if slot, ok := g.lookupVar(name); ok {
+		switch slot.kind {
+		case vBox:
+			g.line("%s->v = %s;", cVarName(name), val)
+		case vCapture:
+			g.line("zenv->%s->v = %s;", envFieldName(name), val)
+		default:
+			g.line("%s = %s;", cVarName(name), val)
+		}
+		return nil
+	}
+	// 被内层闭包捕获的变量需要装箱（堆上共享）
+	if g.boxedBy(g.cur, name) {
+		g.setVar(name, varSlot{kind: vBox})
+		g.line("ZBox* %s = z_box(%s);", cVarName(name), val)
 		return nil
 	}
 	g.declare(name)
