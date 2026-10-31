@@ -1296,19 +1296,6 @@ func bigTextSigned(o *object.Int, base int) string {
 	return o.AsBig().Text(base)
 }
 
-func itoaHex(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	const digits = "0123456789abcdef"
-	var buf []byte
-	for n > 0 {
-		buf = append([]byte{digits[n%16]}, buf...)
-		n /= 16
-	}
-	return string(buf)
-}
-
 func roundHalfEven(f float64) float64 {
 	r := math.Round(f)
 	if math.Abs(f-math.Trunc(f)) == 0.5 {

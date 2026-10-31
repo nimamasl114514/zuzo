@@ -152,9 +152,6 @@ func guardNativeOp(kind nativeOpKind, v1, v2 int64, hasV2 bool, constVal int64) 
 	return res, guardOK
 }
 
-// smiFitsInt64 供 while/for 的计数器与初值判定复用
-func smiFitsInt64(v int64) bool { return dbSmiFits(v) }
-
 // ============================================================
 // 热路径专用：三个刻意写小的检查函数（第21轮性能回收）
 // ============================================================

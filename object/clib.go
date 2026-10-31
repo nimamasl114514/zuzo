@@ -2,7 +2,6 @@ package object
 
 import (
 	"fmt"
-	"runtime"
 	"sync"
 	"unsafe"
 )
@@ -115,31 +114,6 @@ func ParseCFFIType(s string) (CFFIType, bool) {
 		return CStr, true
 	default:
 		return 0, false
-	}
-}
-
-// cffiTypeSize 返回 CFFIType 的字节大小
-func cffiTypeSize(t CFFIType) int {
-	switch t {
-	case CVoid:
-		return 0
-	case CInt, CUInt, CFloat:
-		return 4
-	case CLong, CULong:
-		if runtime.GOOS == "windows" || runtime.GOARCH == "386" {
-			return 4
-		}
-		return 8
-	case CLongLong, CDouble:
-		return 8
-	case CChar, CUChar, CBool:
-		return 1
-	case CShort, CUShort:
-		return 2
-	case CPtr, CStr:
-		return int(unsafe.Sizeof(unsafe.Pointer(nil)))
-	default:
-		return 0
 	}
 }
 

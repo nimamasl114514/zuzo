@@ -611,11 +611,6 @@ func (p *Parser) parseParamList() ([]*Param, bool, error) {
 	return out, variadic, nil
 }
 
-// isTypeNameAhead 判断是否类型名起始（用于 sizeof / cast / 复合字面量）
-func (p *Parser) isTypeNameAhead() bool {
-	return p.hasTypeSpecAhead()
-}
-
 // parseTypeName 解析类型名（抽象声明符）
 func (p *Parser) parseTypeName() (*CType, error) {
 	ds, err := p.parseDeclSpecs()

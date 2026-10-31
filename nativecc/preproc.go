@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -623,10 +622,4 @@ func (p *Preprocessor) Tokens() []Token {
 		out = append(out, Token{Kind: TEOF})
 	}
 	return out
-}
-
-// helper: 字符串转整数（供 driver 使用）
-func atoiSafe(s string) int64 {
-	v, _ := strconv.ParseInt(s, 10, 64)
-	return v
 }

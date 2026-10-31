@@ -65,16 +65,6 @@ func bi(name string, fn object.BuiltinFn) *object.Builtin {
 	return &object.Builtin{Name: name, Fn: fn}
 }
 
-// fn 简化内置函数签名（固定参数）
-func fn1(name string, f func(a object.Object) object.Object) *object.Builtin {
-	return bi(name, func(args []object.Object, kw map[string]object.Object) (object.Object, error) {
-		if len(args) < 1 {
-			return nil, &PyError{Exc: object.NewException(object.ExcType, &object.Str{V: name + "() missing argument"})}
-		}
-		return f(args[0]), nil
-	})
-}
-
 // ==================== math ====================
 
 func modMath(ip *Interp) *object.Module {

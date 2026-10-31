@@ -521,17 +521,6 @@ func FingerprintNode(node Node) uint64 {
 	return ctx.computeNode(node)
 }
 
-// fingerprintBlock 计算代码块中所有语句指纹的组合。（向后兼容）
-func fingerprintBlock(block *BlockStatement) uint64 {
-	if block == nil {
-		return 0
-	}
-	ctx := newFingerprintCtx()
-	ctx.collectVarsBlock(block)
-	ctx.assignPrimes()
-	return ctx.computeBlock(block)
-}
-
 // --- 辅助函数 ---
 
 // isCommutative 判断运算符是否满足交换律

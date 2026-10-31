@@ -359,16 +359,6 @@ func (g *Gen) boxedBy(fi *fnInfo, name string) bool {
 	return m != nil && m[name]
 }
 
-// sortedNames 稳定排序，保证生成结果可复现
-func sortedNames(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // genDefine 把「定义 X { 字段 = 默认值 }」编译成构造函数：返回一个哈希实例。
 func (g *Gen) genDefine(d *ast.DefineStatement) error {
 	g.line("static ZVal zdef_%s(int argc, ZVal* argv, void* env) {", sanitizeIdent(d.Name))
