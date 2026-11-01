@@ -33,6 +33,28 @@ func asPyObj(o object.Object) (*object.PyObj, bool) {
 	return p, ok
 }
 
+// checkTransferable 拦截不能过桥的值（.hy 函数/内置/定义）
+// 桥是单向的：CPython 不能回调 .hy 代码，静默转成字符串只会让人误解。
+func checkTransferable(name string, args []object.Object) *object.Error {
+	for _, a := range args {
+		switch a.(type) {
+		case *object.Function, *object.Builtin, *object.Define:
+			return pyErr("E914", "%s() 不支持把 .hy 函数/内置传给 Python（桥是单向的，CPython 不能回调 .hy）；请改传标量/数组/字典/句柄", name)
+		}
+	}
+	return nil
+}
+
+// notPyObjectErr 对「传了快照容器」给出可操作的提示
+func notPyObjectErr(name string, o object.Object) *object.Error {
+	t := o.Type()
+	hint := ""
+	if t == object.ARRAY_OBJ || t == object.HASH_OBJ {
+		hint = "（数组/字典过桥是快照，不是远端对象；要操作真对象请 py导入 / py取 / py方法 逐步做，或把数据作为参数传给 Python 函数）"
+	}
+	return pyErr("E913", "%s() 第一个参数必须是 Python 对象，得到 %s%s", name, t, hint)
+}
+
 // ==================== py导入 ====================
 
 // py导入(模块名) → Python对象 — 导入真实 CPython 模块（含 C 扩展）
@@ -62,7 +84,7 @@ func builtinPyGet(args ...object.Object) object.Object {
 	}
 	target, ok := asPyObj(args[0])
 	if !ok {
-		return pyErr("E913", "py取() 第一个参数必须是 Python 对象，得到 %s", args[0].Type())
+		return notPyObjectErr("py取", args[0])
 	}
 	name, ok := args[1].(*object.String)
 	if !ok {
@@ -88,6 +110,9 @@ func builtinPySet(args ...object.Object) object.Object {
 	if !ok {
 		return pyErr("E911", "py设() 第二个参数必须是字符串，得到 %s", args[1].Type())
 	}
+	if e := checkTransferable("py设", args[2:]); e != nil {
+		return e
+	}
 	if err := pyBridge().SetAttr(target, name.Value, args[2]); err != nil {
 		return pyErr("E912", "%v", err)
 	}
@@ -101,9 +126,12 @@ func builtinPyCall(args ...object.Object) object.Object {
 	if len(args) < 1 {
 		return pyErr("E911", "py调() 至少需要 1 个参数（可调用对象）")
 	}
+	if e := checkTransferable("py调", args[1:]); e != nil {
+		return e
+	}
 	target, ok := asPyObj(args[0])
 	if !ok {
-		return pyErr("E913", "py调() 第一个参数必须是 Python 可调用对象（用 py导入 / py取 / py方法 取得），得到 %s", args[0].Type())
+		return notPyObjectErr("py调", args[0])
 	}
 	v, err := pyBridge().Call(target, args[1:], nil)
 	if err != nil {
@@ -119,7 +147,7 @@ func builtinPyMethod(args ...object.Object) object.Object {
 	}
 	target, ok := asPyObj(args[0])
 	if !ok {
-		return pyErr("E913", "py方法() 第一个参数必须是 Python 对象，得到 %s", args[0].Type())
+		return notPyObjectErr("py方法", args[0])
 	}
 	name, ok := args[1].(*object.String)
 	if !ok {
@@ -147,7 +175,7 @@ func builtinPyCallKw(args ...object.Object) object.Object {
 	}
 	target, ok := asPyObj(args[0])
 	if !ok {
-		return pyErr("E913", "py调参() 第一个参数必须是 Python 可调用对象，得到 %s", args[0].Type())
+		return notPyObjectErr("py调参", args[0])
 	}
 	var pos []object.Object
 	kwargs := map[string]object.Object{}

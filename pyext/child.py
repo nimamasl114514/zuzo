@@ -49,6 +49,7 @@ import os
 import platform
 import sys
 import traceback
+import uuid
 
 PROTO_VERSION = 1
 MAX_REPR = 200            # 契约：obj/call 的 repr 截前 200 字符
@@ -432,6 +433,8 @@ def to_native(v):
 # 常驻 globals（eval / exec 共享）
 # ---------------------------------------------------------------------------
 
+SESSION = uuid.uuid4().hex
+
 GLOBALS = {
     "__name__": "__pybridge__",
     "__doc__": None,
@@ -478,10 +481,13 @@ def resolve_attr(obj, name: str):
 # ---------------------------------------------------------------------------
 
 def op_hello(req):
+    # session 用于识别「子进程重启」：Go 侧拿它给句柄打戳，重启后旧句柄一律判失效，
+    # 避免 ABA（新进程句柄表从 1 重新分配，旧 ID 指向完全不同的对象）。
     return {
         "py": platform.python_version(),
         "exe": sys.executable or "",
         "impl": platform.python_implementation(),
+        "session": SESSION,
     }
 
 

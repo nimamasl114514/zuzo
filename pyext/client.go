@@ -44,8 +44,9 @@ type Client struct {
 	reader *bufio.Reader
 	nextID int64
 
-	pyExe string
-	pyVer string
+	pyExe   string
+	pyVer   string
+	session string // 子进程会话标识（hello 返回）
 
 	started bool
 	dead    bool
@@ -238,13 +239,15 @@ func (c *Client) startLocked() error {
 		return fmt.Errorf("pyext: 子进程握手失败: %v", err)
 	}
 	var hs struct {
-		Py   string `json:"py"`
-		Exe  string `json:"exe"`
-		Impl string `json:"impl"`
+		Py      string `json:"py"`
+		Exe     string `json:"exe"`
+		Impl    string `json:"impl"`
+		Session string `json:"session"`
 	}
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &hs)
 	}
+	c.session = hs.Session
 	if hs.Py != "" {
 		c.pyVer = hs.Py
 	}
@@ -435,7 +438,7 @@ func (c *Client) callTimeout(op string, payload map[string]any, timeout time.Dur
 	if len(raw) == 0 {
 		return &object.Null{}, nil
 	}
-	return decodeVal(raw)
+	return decodeVal(raw, c.session)
 }
 
 // ==================== 对外 API（zuzo 内置函数调用） ====================
@@ -470,13 +473,31 @@ func (c *Client) Import(name string) (object.Object, error) {
 	return c.call("import", map[string]any{"name": name})
 }
 
+// checkHandle 拦截「子进程重启后的旧句柄」（ABA）
+func (c *Client) checkHandle(p *object.PyObj) error {
+	if p == nil {
+		return errors.New("pyext: 空句柄")
+	}
+	if p.Session != "" && c.session != "" && p.Session != c.session {
+		return errors.New("句柄已失效：CPython 子进程重启过，请重新 py导入 / py取（旧句柄不再指向原对象）")
+	}
+	return nil
+}
+
 // GetAttr 取属性
 func (c *Client) GetAttr(target *object.PyObj, name string) (object.Object, error) {
+	if err := c.checkHandle(target); err != nil {
+		return nil, err
+	}
 	return c.call("get", map[string]any{"id": target.ID, "name": name})
 }
 
 // SetAttr 设属性
 func (c *Client) SetAttr(target *object.PyObj, name string, v object.Object) error {
+	if err := c.checkHandle(target); err != nil {
+		return err
+	}
+	
 	enc, err := encodeObj(v)
 	if err != nil {
 		return err
@@ -487,6 +508,10 @@ func (c *Client) SetAttr(target *object.PyObj, name string, v object.Object) err
 
 // Call 调用句柄
 func (c *Client) Call(target *object.PyObj, args []object.Object, kwargs map[string]object.Object) (object.Object, error) {
+	if err := c.checkHandle(target); err != nil {
+		return nil, err
+	}
+	
 	encArgs := make([]any, 0, len(args))
 	for _, a := range args {
 		e, err := encodeObj(a)
@@ -508,6 +533,10 @@ func (c *Client) Call(target *object.PyObj, args []object.Object, kwargs map[str
 
 // Repr 取远端 repr
 func (c *Client) Repr(target *object.PyObj) (string, error) {
+	if err := c.checkHandle(target); err != nil {
+		return "", err
+	}
+	
 	v, err := c.call("repr", map[string]any{"id": target.ID})
 	if err != nil {
 		return "", err
@@ -520,11 +549,19 @@ func (c *Client) Repr(target *object.PyObj) (string, error) {
 
 // Native 尽力转成 zuzo 原生值（ndarray→数组、DataFrame→记录数组…）
 func (c *Client) Native(target *object.PyObj) (object.Object, error) {
+	if err := c.checkHandle(target); err != nil {
+		return nil, err
+	}
+	
 	return c.call("native", map[string]any{"id": target.ID})
 }
 
 // Release 释放远端句柄
 func (c *Client) Release(target *object.PyObj) error {
+	if err := c.checkHandle(target); err != nil {
+		return err
+	}
+	
 	_, err := c.call("release", map[string]any{"id": target.ID})
 	return err
 }

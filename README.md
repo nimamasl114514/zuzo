@@ -112,10 +112,11 @@ print(总)
 ./run_tests.sh        # Python 语义与 CPython 逐字节对拍（33 用例）
 ./run_tests_mix.sh    # 混合语言 golden（15 用例）
 ./run_tests_llvm.sh   # LLVM 后端对拍（20 用例）
+./run_tests_bridge.sh # CPython 子进程桥对拍（15 用例：numpy / pandas / requests / 错误 / 句柄）
 go test ./...         # Go 单测（含原生循环、SAP、混合切块）
 ```
 
-当前状态（2026-11-01 实测）：`run_tests` **33/33 通过**，且 `--shadow` 影子模式 **33/33 双轨一致**；`run_tests_mix` **15/15**；`run_tests_llvm` **20/20**；`projects/mini_scheme` 解释器与 LLVM 产物均 **31/31**；Go 单测覆盖 `ast` / `evaluator` / `fuzz` / `mix` / `tests`。
+当前状态（2026-11-01 实测）：`run_tests` **33/33 通过**，且 `--shadow` 影子模式 **33/33 双轨一致**；`run_tests_mix` **15/15**；`run_tests_llvm` **20/20**·`run_tests_bridge` **15/15**；`projects/mini_scheme` 解释器与 LLVM 产物均 **31/31**；Go 单测覆盖 `ast` / `evaluator` / `fuzz` / `mix` / `tests`。
 
 ## 文档
 

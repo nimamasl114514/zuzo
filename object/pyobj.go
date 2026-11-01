@@ -18,6 +18,7 @@ type PyObj struct {
 	Repr     string // repr 前若干字符（打印用）
 	Callable bool   // true = 可直接 py调
 	Bridge   string // 所属桥标识（当前恒为 "pyext"，留作多桥扩展）
+	Session  string // 子进程会话标识（重启后失配 → 旧句柄作废，防 ABA）
 }
 
 func (p *PyObj) Type() ObjectType { return PY_OBJ }

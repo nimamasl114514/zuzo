@@ -30,7 +30,7 @@ func TestDecodePrimitives(t *testing.T) {
 		{`{"k":"call","id":8,"t":"builtin_function_or_method","r":"<built-in>"}`, "<built-in>", object.PY_OBJ},
 	}
 	for _, c := range cases {
-		got, err := decodeVal(json.RawMessage(c.raw))
+		got, err := decodeVal(json.RawMessage(c.raw), "sess")
 		if err != nil {
 			t.Fatalf("%s: %v", c.raw, err)
 		}
@@ -45,7 +45,7 @@ func TestDecodePrimitives(t *testing.T) {
 
 func TestDecodeOverflowIntBecomesString(t *testing.T) {
 	// 2**70 超出 int64：必须降级为字符串，绝不静默截断
-	got, err := decodeVal(json.RawMessage(`{"k":"int","v":"1180591620717411303424"}`))
+	got, err := decodeVal(json.RawMessage(`{"k":"int","v":"1180591620717411303424"}`), "sess")
 	if err != nil {
 		t.Fatal(err)
 	}

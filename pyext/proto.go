@@ -29,7 +29,7 @@ type wireVal struct {
 // ==================== Python → zuzo ====================
 
 // decodeVal 把子进程返回的 enc 解码成 zuzo 对象
-func decodeVal(raw json.RawMessage) (object.Object, error) {
+func decodeVal(raw json.RawMessage, session string) (object.Object, error) {
 	var w wireVal
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return nil, fmt.Errorf("pyext: 协议值解析失败: %v", err)
@@ -98,7 +98,7 @@ func decodeVal(raw json.RawMessage) (object.Object, error) {
 		}
 		arr := &object.Array{Elements: make([]object.Object, 0, len(items))}
 		for _, it := range items {
-			o, err := decodeVal(it)
+			o, err := decodeVal(it, session)
 			if err != nil {
 				return nil, err
 			}
@@ -115,11 +115,11 @@ func decodeVal(raw json.RawMessage) (object.Object, error) {
 			if len(pr) != 2 {
 				continue
 			}
-			k, err := decodeVal(pr[0])
+			k, err := decodeVal(pr[0], session)
 			if err != nil {
 				return nil, err
 			}
-			v, err := decodeVal(pr[1])
+			v, err := decodeVal(pr[1], session)
 			if err != nil {
 				return nil, err
 			}
@@ -135,7 +135,7 @@ func decodeVal(raw json.RawMessage) (object.Object, error) {
 		}
 		return h, nil
 	case "obj", "call":
-		return &object.PyObj{ID: w.ID, Typ: w.T, Repr: w.R, Callable: w.K == "call", Bridge: "pyext"}, nil
+		return &object.PyObj{ID: w.ID, Typ: w.T, Repr: w.R, Callable: w.K == "call", Bridge: "pyext", Session: session}, nil
 	case "":
 		// 兼容：实现方直接返回裸 JSON（无 k 标记）
 		return decodeRawJSON(raw)
