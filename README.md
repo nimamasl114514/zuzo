@@ -40,6 +40,10 @@ go build -o zuzo ./
 ./zuzo examples/mixed_demo.hypy       # 混合语言
 ./zuzo -e '打印("你好")'               # 内联
 
+# 装 Python 库（与 py导入 共用同一个 CPython 解释器）
+./zuzo pip install numpy pandas
+./zuzo pip list
+
 # 类型检查 / 分析
 ./zuzo --check 文件.hy
 ./zuzo --analyze 文件.hy

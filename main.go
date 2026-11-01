@@ -106,6 +106,37 @@ func main() {
 		return
 	}
 
+	// 第32轮：`zuzo pip ...` 直接转给桥用的那个 CPython 的 pip。
+	// 与 py导入 共用同一个解释器 —— 装完立刻就能在 .hy 里 import，不用再折腾 PATH。
+	if args[0] == "pip" || args[0] == "pip3" {
+		sub := args[1:]
+		// 中文子命令别名
+		if len(sub) > 0 {
+			switch sub[0] {
+			case "安装":
+				sub[0] = "install"
+			case "卸载":
+				sub[0] = "uninstall"
+			case "列表":
+				sub[0] = "list"
+			case "版本":
+				sub[0] = "--version"
+			}
+		}
+		if len(sub) == 0 {
+			sub = []string{"--help"}
+		}
+		code, err := pyext.Pip(sub, os.Stdin, os.Stdout, os.Stderr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "zuzo pip: %v\n", err)
+			if strings.Contains(err.Error(), "未找到可用的 CPython") {
+				fmt.Fprintln(os.Stderr, "提示：先用 ZUZO_PYTHON=<python.exe 绝对路径> 指定解释器，或安装任意 Python 3.8+")
+			}
+			os.Exit(2)
+		}
+		os.Exit(code)
+	}
+
 	// 解析全局标志
 	noSAP := false
 	shadow := false

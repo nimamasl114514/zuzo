@@ -676,6 +676,35 @@ func (c *Client) Stats() map[string]object.Object {
 	}
 }
 
+// PythonExe 返回桥使用的 CPython 可执行文件（供 zuzo pip 复用同一解释器）
+func (c *Client) PythonExe() (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	exe, _, err := c.resolvePythonLocked()
+	return exe, err
+}
+
+// Pip 把 `zuzo pip ...` 原样转给同一个 CPython 的 pip（流式输出，退出码透传）
+// 注意：与 py导入 用同一个解释器，装完立刻能被 py导入 看到（子进程侧还会 invalidate_caches 兜底）。
+func Pip(args []string, in io.Reader, out, errw io.Writer) (int, error) {
+	exe, err := Default().PythonExe()
+	if err != nil {
+		return 2, err
+	}
+	cmdArgs := append([]string{"-m", "pip"}, args...)
+	cmd := exec.Command(exe, cmdArgs...)
+	cmd.Stdin = in
+	cmd.Stdout = out
+	cmd.Stderr = errw
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return ee.ExitCode(), nil
+		}
+		return 2, err
+	}
+	return 0, nil
+}
+
 // Install 走 pip 安装（显式调用，绝不隐式联网）
 func (c *Client) Install(pkg string) (string, error) {
 	c.mu.Lock()

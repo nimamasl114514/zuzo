@@ -499,7 +499,12 @@ def op_import(req):
     name = req.get("name")
     if not isinstance(name, str) or not name:
         raise ProtocolError("import requires non-empty 'name'")
-    mod = importlib.import_module(name)
+    try:
+        mod = importlib.import_module(name)
+    except ModuleNotFoundError:
+        # pip 刚装完时常驻进程的 finder 缓存可能还看不到 → 失效缓存重试一次
+        importlib.invalidate_caches()
+        mod = importlib.import_module(name)
     return enc(mod)
 
 

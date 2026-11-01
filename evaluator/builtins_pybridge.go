@@ -16,6 +16,7 @@ package evaluator
 
 import (
 	"fmt"
+	"strings"
 
 	"zuzo/object"
 	"zuzo/pyext"
@@ -68,7 +69,11 @@ func builtinPyImport(args ...object.Object) object.Object {
 	}
 	v, err := pyBridge().Import(name.Value)
 	if err != nil {
-		return pyErr("E912", "%v", err)
+		msg := err.Error()
+		if strings.Contains(msg, "No module named") || strings.Contains(msg, "ModuleNotFoundError") {
+			msg += "\n提示：该库未安装 → ./zuzo.exe pip install " + name.Value
+		}
+		return pyErr("E912", "%s", msg)
 	}
 	// 首次导入 C 扩展即视为进入子进程模式，后续 py求值/py执行 走同一份命名空间
 	pyBridge().Activate()

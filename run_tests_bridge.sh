@@ -17,6 +17,16 @@ ZUZO=./zuzo.exe
 
 PATTERN="${1:-}"
 
+# pip 通道（不联网的只读自检；与 py导入 共用同一 CPython）
+if [ -x "$ZUZO" ] || [ -x "./zuzo" ]; then
+    PIPLINE=$("$ZUZO" pip --version 2>/dev/null | head -1)
+    if [ -n "$PIPLINE" ]; then
+        echo "[INFO] pip: $PIPLINE"
+    else
+        echo "[WARN] pip 通道不可用（桥探测不到 CPython？）"
+    fi
+fi
+
 pass=0
 fail=0
 failed_list=""

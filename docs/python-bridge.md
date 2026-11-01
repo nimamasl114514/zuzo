@@ -32,7 +32,40 @@ zuzo.exe (Go)                              python.exe (CPython 3.x)
 
 ---
 
-## 二、开关与环境变量
+## 二、`zuzo pip`：装完就能用
+
+桥用的是「本机某个真实 CPython」，所以装包也走同一个解释器，命令与 pip 完全一致（不会出现「装到 A 解释器、桥用 B 解释器」的经典错位）：
+
+```bash
+./zuzo.exe pip install numpy pandas requests   # 装包（透传全部 pip 参数）
+./zuzo.exe pip list                            # 看已装
+./zuzo.exe pip 安装 humanize                    # 中文子命令别名：安装 / 卸载 / 列表 / 版本
+./zuzo.exe pip --version                       # 打印是哪个 python 的 pip
+```
+
+实测（本机）：
+
+```bash
+$ ./zuzo.exe pip install humanize
+Successfully installed humanize-4.16.0
+
+$ cat 示例.hy
+变量 h = py导入("humanize")
+打印(py调(py取(h, "intcomma"), 1234567))
+
+$ ./zuzo.exe 示例.hy
+1,234,567
+```
+
+三条口径：
+
+1. **同一个解释器**：`zuzo pip` 与 `py导入` 共用桥探测到的 CPython（`ZUZO_PYTHON` 可指定），装完立刻可用；常驻子进程还会在导入失败时 `invalidate_caches()` 重试一次，避免「装了但当前进程看不到」。
+2. **不隐式联网**：只有你敲 `zuzo pip install` 才会联网；`.hy` 运行时绝不偷偷装包。
+3. **缺库有指引**：`py导入("xxx")` 失败时错误信息末尾直接给命令：`提示：该库未安装 → ./zuzo.exe pip install xxx`。
+
+---
+
+## 三、开关与环境变量
 
 | 环境变量 | 取值 | 行为 |
 |---|---|---|
@@ -46,7 +79,7 @@ zuzo.exe (Go)                              python.exe (CPython 3.x)
 
 ---
 
-## 三、自动降级：老代码不改一行
+## 四、自动降级：老代码不改一行
 
 ```zuzo
 py执行("import numpy as np")     // 第 1 步：纯 Go 运行时尝试 → 在 numpy/core/_multiarray_umath 处失败
@@ -66,7 +99,7 @@ py执行("import numpy as np")     // 第 1 步：纯 Go 运行时尝试 → 在
 
 ---
 
-## 四、内置函数速查
+## 五、内置函数速查
 
 | 函数 | 签名 | 返回 | 示例 |
 |---|---|---|---|
@@ -94,7 +127,7 @@ py执行("import numpy as np")     // 第 1 步：纯 Go 运行时尝试 → 在
 
 ---
 
-## 五、值转换规则
+## 六、值转换规则
 
 ### 5.1 zuzo → Python
 
@@ -133,7 +166,7 @@ py执行("import numpy as np")     // 第 1 步：纯 Go 运行时尝试 → 在
 
 ---
 
-## 六、完整示例
+## 七、完整示例
 
 ### 6.1 numpy：数组与方法链
 
@@ -179,7 +212,7 @@ py方法(df, "__setitem__", "c", [7,7,7])
 
 ---
 
-## 七、错误处理
+## 八、错误处理
 
 | 错误码 | 含义 | 典型触发 | 处理 |
 |---|---|---|---|
@@ -205,7 +238,7 @@ py方法(df, "__setitem__", "c", [7,7,7])
 
 ---
 
-## 八、性能（本机实测）
+## 九、性能（本机实测）
 
 | 场景 | 数值 | 来源 |
 |---|---|---|
@@ -218,7 +251,7 @@ py方法(df, "__setitem__", "c", [7,7,7])
 
 ---
 
-## 九、边界
+## 十、边界
 
 1. **单向调用**：CPython 不能回调 `.hy` 函数（桥只传值，不传函数）。
 2. **快照语义**：数组/字典过桥即拷贝，改副本不影响远端；改远端必须 `py设` / `__setitem__`。
@@ -229,7 +262,7 @@ py方法(df, "__setitem__", "c", [7,7,7])
 
 ---
 
-## 十、验收命令
+## 十一、验收命令
 
 ```bash
 # 1) 桥单测（无 CPython 自动 Skip）
@@ -243,6 +276,9 @@ CGO_ENABLED=1 CC="/c/Dev/zig/zig cc" go test ./pyext -count=1
 python pyext/child.py --selftest
 # → SELFTEST PASS 25
 
-# 4) 关掉桥，验回退语义
+# 4) pip 通道
+./zuzo.exe pip --version
+
+# 5) 关掉桥，验回退语义
 ZUZO_PY_BRIDGE=0 ./zuzo.exe tests_bridge/t02_auto_fallback.hy   # 应报 C 扩展错误
 ```
