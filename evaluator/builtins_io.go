@@ -74,12 +74,24 @@ func builtinAppendFile(args ...object.Object) object.Object {
 }
 
 // 读行() → 字符串 — 从标准输入读取一行（阻塞）
+// stdinScanner 标准输入的进程级扫描器（惰性初始化）
+var stdinScannerInstance *bufio.Scanner
+
+func stdinScanner() *bufio.Scanner {
+	if stdinScannerInstance == nil {
+		stdinScannerInstance = bufio.NewScanner(os.Stdin)
+	}
+	return stdinScannerInstance
+}
+
 func builtinReadLine(args ...object.Object) object.Object {
 	if len(args) != 0 {
 		return newError("读行() 期望 0 个参数，得到 %d 个", len(args))
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
+	// 扫描器必须是进程级单例：每次新建 Scanner 会把管道里多读的字节丢掉，
+	// 导致第二次 读行() 直接读到 EOF（第29轮实测：REPL 只能处理第一行）
+	scanner := stdinScanner()
 	if scanner.Scan() {
 		return &object.String{Value: scanner.Text()}
 	}

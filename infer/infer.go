@@ -519,7 +519,11 @@ func (i *Inferencer) inferExpr(expr ast.Expression) Type {
 				t = resultT
 			}
 		case "<", ">", "<=", ">=", "==", "!=":
-			i.addConstraint(leftType, rightType, n)
+			// 与「空」比较对任何类型都合法（x == 空 / x != 空 是最常见的判空写法），
+			// 不能把两边约束成同一类型，否则会误报「期望字符串，得到空」
+			if leftType.resolved() != TNull && rightType.resolved() != TNull {
+				i.addConstraint(leftType, rightType, n)
+			}
 			t = TBool
 		case "并且", "或者":
 			i.addConstraint(leftType, TBool, n)
