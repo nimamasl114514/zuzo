@@ -155,5 +155,5 @@ var rtTable = map[string]rtSig{
 
 // 非运行时（CRT）声明。
 var crtDecls = map[string]string{
-	"_setjmp": "declare i32 @_setjmp(ptr) returns_twice",
+	"_setjmp": "declare i32 @_setjmp(ptr, ptr) returns_twice",
 }

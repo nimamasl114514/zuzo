@@ -262,7 +262,11 @@ func floatLit(f float64) string {
 	if math.IsNaN(f) {
 		return "0x7FF8000000000000"
 	}
-	return strconv.FormatFloat(f, 'g', -1, 64)
+	s := strconv.FormatFloat(f, 'g', -1, 64)
+	if !strings.ContainsAny(s, ".eE") {
+		s += ".0"
+	}
+	return s
 }
 
 func (g *Gen) constInt(n int64) *Value {

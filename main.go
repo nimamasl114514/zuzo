@@ -10,7 +10,7 @@ import (
 
 	"zuzo/analyze"
 	"zuzo/ast"
-	"zuzo/cbackend"
+	"zuzo/llvmbackend"
 	"zuzo/diagnostic"
 	"zuzo/encoding"
 	"zuzo/evaluator"
@@ -155,6 +155,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if strings.HasPrefix(args[0], "--cc=") {
+		fmt.Fprintln(os.Stderr, "错误: --cc 选项已随 C 后端移除（现在固定走 LLVM：--emit-llvm / --emit-exe）")
+		os.Exit(2)
+	}
+
 	if jsonOut && args[0] != "-c" && args[0] != "--check" {
 		fmt.Fprintln(os.Stderr, "错误: --json 仅用于 -c/--check 的静态检查输出")
 		os.Exit(2)
@@ -180,10 +185,13 @@ func main() {
 		}
 		analyzeFile(args[1])
 	case "--emit-c":
-		cbackend.SetStrictTypes(strict)
-		emitCCommand(args[1:])
+		fmt.Fprintln(os.Stderr, "错误: --emit-c（C 源码后端）已在第31轮移除，请使用 --emit-llvm 生成 LLVM IR，或 --emit-exe 生成可执行文件")
+		os.Exit(2)
+	case "--emit-llvm", "--emit-ir":
+		llvmbackend.SetStrictTypes(strict)
+		emitLLVMCommand(args[1:])
 	case "--emit-exe":
-		cbackend.SetStrictTypes(strict)
+		llvmbackend.SetStrictTypes(strict)
 		emitExeCommand(args[1:])
 	case "--py":
 		pyrt.RunREPL(os.Stdin, os.Stdout, os.Stderr)
@@ -677,8 +685,8 @@ func printHelp() {
   zuzo -e "代码"    执行内联代码
   zuzo -a <文件>    拓扑指纹分析（查重/死代码/CSE）
   zuzo -c <文件>    静态类型检查（加 --json 输出机器可读 JSON 数组）
-  zuzo --emit-c <文件.hy> [-o 出.c]   编译为 C 源码（C 后端）
-  zuzo --emit-exe <文件.hy> [-o 出.exe]  编译为可执行文件（C → gcc）
+  zuzo --emit-llvm <文件.hy> [-o 出.ll]  生成 LLVM IR（LLVM 后端）
+  zuzo --emit-exe <文件.hy> [-o 出.exe]  生成可执行文件（LLVM IR → clang）
   zuzo --help       显示帮助
   zuzo --version    显示版本
 
