@@ -153,15 +153,19 @@ func (fs *ForStatement) String() string {
 
 // ImportStatement 导入语句: 导入 "文件路径" 或 导入 "文件路径" 为 模块名
 type ImportStatement struct {
-	Token token.Token // 导入
-	Path  string      // 文件路径
-	Alias string      // 模块名（为空表示直接导入到当前作用域）
+	Token  token.Token // 导入
+	Path   string      // 文件路径，或 Python 模块名（IsName=true）
+	Alias  string      // 模块名（为空表示直接导入到当前作用域）
+	IsName bool        // true = 导入 Python 模块（导入 numpy / 导入 numpy 为 np）
 }
 
 func (is *ImportStatement) statementNode()       {}
 func (is *ImportStatement) TokenLiteral() string { return is.Token.Literal }
 func (is *ImportStatement) String() string {
 	s := "导入 \"" + is.Path + "\""
+	if is.IsName {
+		s = "导入 " + is.Path
+	}
 	if is.Alias != "" {
 		s += " 为 " + is.Alias
 	}

@@ -1646,6 +1646,21 @@ func builtinLen(args ...object.Object) object.Object {
 		return &object.Integer{Value: int64(len([]rune(arg.Value)))}
 	case *object.Array:
 		return &object.Integer{Value: int64(len(arg.Elements))}
+	case *object.PyObj:
+		// 第32轮：Python 对象走 len()
+		fn, err := pyBridge().GetAttr(arg, "__len__")
+		if err != nil {
+			return newError("长度() 无法取 Python 对象的长度：%v", err)
+		}
+		fno, ok := fn.(*object.PyObj)
+		if !ok {
+			return newError("长度() Python 对象没有 __len__")
+		}
+		v, err := pyBridge().Call(fno, nil, nil)
+		if err != nil {
+			return newError("长度() 调用 __len__ 失败：%v", err)
+		}
+		return v
 	default:
 		return newError("长度() 不支持类型: %s", arg.Type())
 	}

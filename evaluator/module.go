@@ -450,8 +450,30 @@ func (m *ModuleManager) loadHyFile(absPath string, importPath string) (object.Ob
 	return mod, nil
 }
 
+// evalPythonImport 把 CPython 模块绑定成一个变量（后续可用点号直调）
+func evalPythonImport(node *ast.ImportStatement, env *object.Environment) object.Object {
+	mod, err := pyBridge().Import(node.Path)
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "No module named") || strings.Contains(msg, "ModuleNotFoundError") {
+			msg += "\n提示：该库未安装 → ./zuzo.exe pip install " + strings.SplitN(node.Path, ".", 2)[0]
+		}
+		return newErrorWithNode(node, "E912", "%s", msg)
+	}
+	name := node.Alias
+	if name == "" {
+		name = strings.SplitN(node.Path, ".", 2)[0]
+	}
+	env.Set(name, mod)
+	return NULL
+}
+
 // evalImportStatement 处理导入语句
 func evalImportStatement(node *ast.ImportStatement, env *object.Environment) object.Object {
+	// 第32轮：导入 numpy / 导入 numpy 为 np —— 直接绑 CPython 模块句柄
+	if node.IsName {
+		return evalPythonImport(node, env)
+	}
 	if moduleManager == nil {
 		return newErrorWithNode(node, diagnostic.ErrModuleNotInit.Code, "模块系统未初始化，无法导入文件")
 	}

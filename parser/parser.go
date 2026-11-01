@@ -509,12 +509,27 @@ func (p *Parser) parseForStatement() ast.Statement {
 func (p *Parser) parseImportStatement() *ast.ImportStatement {
 	stmt := &ast.ImportStatement{Token: p.curToken}
 
-	if !p.expectPeek(token.STRING) {
+	// 两种形态：导入 "文件.hy"（本地模块） / 导入 numpy（Python 模块，第32轮）
+	p.nextToken()
+	switch {
+	case p.curTokenIs(token.STRING):
+		stmt.Path = p.curToken.Literal
+	case p.curTokenIs(token.IDENT):
+		stmt.Path = p.curToken.Literal
+		stmt.IsName = true
+		// 允许 导入 numpy.linalg 这种点分模块名
+		for p.peekTokenIs(token.DOT) {
+			p.nextToken() // .
+			if !p.expectPeek(token.IDENT) {
+				break
+			}
+			stmt.Path += "." + p.curToken.Literal
+		}
+	default:
 		p.addRootError(diagnostic.ErrInvalidImport.Code, p.curToken.Line, p.curToken.Column,
-			"导入语句需要字符串路径", "请使用 导入 \"文件路径\" 语法")
+			"导入语句需要字符串路径或模块名", "请使用 导入 \"文件.hy\" 或 导入 numpy [为 别名]")
 		return nil
 	}
-	stmt.Path = p.curToken.Literal
 
 	// 检查是否为命名导入: 导入 "文件" 为 模块名
 	if p.peekTokenIs(token.AS) {

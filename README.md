@@ -23,7 +23,7 @@
 - **字符串标准库**：内建 `文本` 命名空间（110 成员：大小写 / 裁剪 / 查找替换 / 分割 / 对齐 / 判定 / 子串 / 中文友好 / UTF-8・编码・正则）+ `libs/strings` 高层封装（统计 / 表格 / 命名法 / 模板 / 千分位）
 - **工具链**：`zpm` 包管理器、类型检查 `--check`、拓扑指纹分析 `--analyze`、影子模式 `--shadow`、CPU 采样 `ZUZO_CPUPROFILE`
 - **LLVM 后端**：`--emit-llvm` 直接生成文本 LLVM IR、`--emit-exe` 走 clang 产出原生 exe；与解释器逐字节对拍（20/20），详见 [LLVM 后端](docs/llvm-backend.md)
-- **CPython 子进程桥**：`变量 np = py导入("numpy")` 之后**点号直调** `np.array([1,2,3]).sum()`（`zuzo pip install` 装包，装完即用）（含 numpy / pandas 这类 C 扩展），句柄引用 + 容器快照，老代码 `py求值/py执行` 命中 `.pyd` 时自动降级并粘住子进程模式；详见 [Python 子进程桥](docs/python-bridge.md)
+- **CPython 子进程桥**：`导入 numpy` 之后**点号直调** `numpy.array([1,2,3]).sum()`（`zuzo pip install` 装包，装完即用；也支持 `导入 pandas 为 pd`）（含 numpy / pandas 这类 C 扩展），句柄引用 + 容器快照，老代码 `py求值/py执行` 命中 `.pyd` 时自动降级并粘住子进程模式；详见 [Python 子进程桥](docs/python-bridge.md)
 
 ## 快速开始
 

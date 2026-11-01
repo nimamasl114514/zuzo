@@ -136,6 +136,17 @@ func evalForInStatement(node *ast.ForInStatement, env *object.Environment) objec
 		return evalForInHash(node, env, coll)
 	case *object.String:
 		return evalForInString(node, env, coll)
+	case *object.PyObj:
+		// 第32轮：Python 可迭代对象先拍平成数组再遍历（生成器/ndarray/Series 都吃）
+		nv, err := pyBridge().Native(coll)
+		if err != nil {
+			return newErrorWithNode(node, "E912", "%v", err)
+		}
+		if arr, ok := nv.(*object.Array); ok {
+			return evalForInArray(node, env, arr)
+		}
+		return newErrorWithNode(node, diagnostic.ErrUnsupportedOperator.Code,
+			"Python 对象不可迭代: %s", coll.Typ)
 	default:
 		return newErrorWithNode(node, diagnostic.ErrUnsupportedOperator.Code,
 			"不可迭代的类型: %s", iterable.Type())

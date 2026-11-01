@@ -123,7 +123,11 @@ func (c *collector) collectDefsStmt(s ast.Statement) {
 			c.collectDefsStmt(n.Body)
 		}
 	case *ast.ImportStatement:
-		c.define(n.Alias)
+		if n.Alias != "" {
+			c.define(n.Alias)
+		} else if n.IsName {
+			c.define(strings.SplitN(n.Path, ".", 2)[0])
+		}
 	case *ast.DefineStatement:
 		c.define(n.Name)
 		for _, f := range n.Fields {

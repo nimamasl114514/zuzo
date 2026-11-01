@@ -62,6 +62,8 @@ zuzo 当前是一个**单二进制交付的脚本/服务端运行时**：能用�
 
 命令行入口：`./zuzo.exe pip install <包>` / `pip list` / `pip 安装|卸载|列表|版本`（透传给桥用的同一 CPython；实测 `./zuzo.exe pip install humanize` → `Successfully installed humanize-4.16.0`，随后 `.hy` 里 `py导入("humanize")` 直接可用）。
 
+入口三种：`导入 numpy`（推荐）/ `变量 np = py导入("numpy")` / `py导入("numpy")` 直接用。
+
 配套内置（14 个）：`py导入 / py取 / py设 / py调 / py调参 / py方法 / py取值 / py描述 / py类型 / py释放 / py模式 / py信息 / py有库 / py安装`（`py调参` 是关键字参数通道）。
 
 - `py有库(名)`：`importlib.util.find_spec` 探测，不实际导入，用于特性门控。
