@@ -150,7 +150,7 @@ size_t strftime(char* buf, size_t cap, const char* fmt, const struct tm* t);
 	"setjmp.h": `
 #ifndef _NATIVECC_SETJMP_H
 #define _NATIVECC_SETJMP_H
-typedef char jmp_buf[16];
+typedef long long jmp_buf[32]; /* msvcrt x64: _JUMP_BUFFER = 256 字节（12 个 GPR/控制 + XMM6-15 + MxCsr）；尺寸偏小会让 _setjmp 越界写栈 */
 int setjmp(jmp_buf env);
 void longjmp(jmp_buf env, int val);
 #endif
@@ -285,7 +285,10 @@ var Imports = map[string]ImportSym{
 	"_localtime64_s": {"msvcrt.dll", "", 2},
 	"strftime":      {"msvcrt.dll", "", 4},
 	// ── 跳转 ──
-	"setjmp":  {"msvcrt.dll", "", 1},
+	// 用 _setjmp 而不是 setjmp：msvcrt 的 setjmp 在 x64 上会走 _setjmpex，
+	// 需要调用方的 PE unwind 信息（.pdata）才能 RtlUnwind，nativecc 不生成 .pdata，
+	// 实测抛 0xc00000ff（RtlUnwindEx）。_setjmp 只保存寄存器，无此依赖。
+	"setjmp":  {"msvcrt.dll", "_setjmp", 1},
 	"longjmp": {"msvcrt.dll", "", 2},
 	// ── Win32 ──
 	"FindFirstFileA": {"kernel32.dll", "", 2},

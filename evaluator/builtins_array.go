@@ -91,7 +91,7 @@ func builtinJoin(args ...object.Object) object.Object {
 	return &object.String{Value: strings.Join(parts, sep)}
 }
 
-// 包含(集合, 元素) → 布尔 — 字符串包含或数组包含
+// 包含(集合, 元素) → 布尔 — 字符串子串、数组成员或哈希键包含
 func builtinContains(args ...object.Object) object.Object {
 	if len(args) != 2 {
 		return newError("包含() 期望 2 个参数，得到 %d 个", len(args))
@@ -108,6 +108,13 @@ func builtinContains(args ...object.Object) object.Object {
 		return nativeBoolToBooleanObject(slices.ContainsFunc(col.Elements, func(e object.Object) bool {
 			return e.Inspect() == target
 		}))
+	case *object.Hash:
+		key, ok := args[1].(object.Hashable)
+		if !ok {
+			return newError("包含() 哈希键必须是可哈希类型，得到 %s", args[1].Type())
+		}
+		_, exists := col.Pairs[key.HashKey()]
+		return nativeBoolToBooleanObject(exists)
 	default:
 		return newError("包含() 不支持类型: %s", col.Type())
 	}

@@ -56,6 +56,9 @@ type Gen struct {
 	// 否则会报「未定义的变量」（第29轮实测：C 后端不支持函数读顶层变量）
 	globals     map[string]bool
 	globalOrder []string
+	// globalLine 顶层变量最后一次定义所在行：与具名函数同名时，
+	// 靠比较两者行号决定「后定义者胜」，与解释器的顺序语义一致
+	globalLine map[string]int
 }
 
 // Generate 把 zuzo 程序翻译成一份完整可编译的 C 源码。
@@ -67,7 +70,7 @@ func Generate(program *ast.Program, opt Options) (code string, err error) {
 	}()
 
 	g := &Gen{funcs: map[string]*fnInfo{}, opt: opt, defines: map[string]*ast.DefineStatement{},
-		globals: map[string]bool{}}
+		globals: map[string]bool{}, globalLine: map[string]int{}}
 	g.ana = analyzeProgram(program)
 	g.collectGlobals(program)
 	for _, stmt := range program.Statements {
@@ -207,18 +210,25 @@ func cGlobalName(name string) string { return "zg_" + sanitizeIdent(name) }
 func (g *Gen) collectGlobals(program *ast.Program) {
 	var walkStmt func(ast.Statement)
 	var walkExpr func(ast.Expression)
-	add := func(name string) {
-		if name == "" || g.globals[name] {
+	add := func(name string, line int) {
+		if name == "" {
+			return
+		}
+		if g.globals[name] {
+			if line > g.globalLine[name] {
+				g.globalLine[name] = line
+			}
 			return
 		}
 		g.globals[name] = true
+		g.globalLine[name] = line
 		g.globalOrder = append(g.globalOrder, name)
 	}
 	walkStmt = func(st ast.Statement) {
 		switch n := st.(type) {
 		case *ast.LetStatement:
 			if n.Name != nil {
-				add(n.Name.Value)
+				add(n.Name.Value, n.Token.Line)
 			}
 			walkExpr(n.Value)
 		case *ast.ExpressionStatement:

@@ -2,10 +2,13 @@ package evaluator
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -30,6 +33,9 @@ import (
 //       "重试": 1,              // 换 worker 重试次数（默认 1）
 //       "超时": 600,            // 上游整体超时秒（默认 600）
 //       "状态路径": "/__proxy/status"  // 状态端点（默认该值；置空禁用）
+//       "状态文件": "C:/.../data.bin",  // 启用 /status 直返并算 token 剩余秒
+//       "服务名": "orcaterm-gateway",
+//       "调试": 假
 //     }
 //
 // 行为：
@@ -68,6 +74,11 @@ type reverseProxyState struct {
 	client    *http.Client
 	statusAPI string
 	static    map[string][]byte // 路径 → 响应体（由 Go 层直返，不下发 worker）
+
+	// /status 直返（Go 层读 data.bin 算 token 剩余，不排队等 worker）
+	statusFile string
+	service    string
+	debug      bool
 }
 
 // 解析目标列表：字符串（逗号/分号分隔）或数组
@@ -125,6 +136,7 @@ func builtinHttpReverseProxy(args ...object.Object) object.Object {
 		timeout:   600 * time.Second,
 		statusAPI: "/__proxy/status",
 		static:    map[string][]byte{},
+		service:   "zuzo-proxy",
 	}
 	for i, u := range urls {
 		st.targets = append(st.targets, &proxyTarget{url: u, index: i})
@@ -139,6 +151,16 @@ func builtinHttpReverseProxy(args ...object.Object) object.Object {
 			}
 			if v, ok := hashGetAny(opt, "状态路径", "statusPath").(*object.String); ok {
 				st.statusAPI = v.Value
+			}
+			// /status 直返：状态文件（OrcaTerm data.bin）→ 服务端算 tokenRemainSec
+			if v, ok := hashGetAny(opt, "状态文件", "statusFile").(*object.String); ok {
+				st.statusFile = v.Value
+			}
+			if v, ok := hashGetAny(opt, "服务名", "service").(*object.String); ok && v.Value != "" {
+				st.service = v.Value
+			}
+			if v, ok := hashGetAny(opt, "调试", "debug").(*object.Boolean); ok {
+				st.debug = v.Value
 			}
 			// 静态路由：{ "/v1/models": "<json>" } 或 { "/x": {"体": "..."} }
 			if sv, ok := hashGetAny(opt, "静态", "static").(*object.Hash); ok {
@@ -181,10 +203,20 @@ func builtinHttpReverseProxy(args ...object.Object) object.Object {
 		},
 	}
 
+	portStr := strconv.FormatInt(portObj.Value, 10)
+	if st.statusFile == "" {
+		st.statusFile = os.Getenv("ORCATERM_DATA") // 兜底：环境变量指定 data.bin
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if st.statusAPI != "" && r.URL.Path == st.statusAPI {
 			st.writeStatus(w)
+			return
+		}
+		// /status：Go 层直返网关自身状态 + token 剩余（worker 忙时不排队）
+		if r.URL.Path == "/status" && st.statusFile != "" {
+			st.writeSelfStatus(w, portStr)
 			return
 		}
 		if r.URL.Path == "/health" {
@@ -205,7 +237,7 @@ func builtinHttpReverseProxy(args ...object.Object) object.Object {
 	})
 
 	srv := &http.Server{
-		Addr:              ":" + strconv.FormatInt(portObj.Value, 10),
+		Addr:              ":" + portStr,
 		Handler:           mux,
 		ReadHeaderTimeout: 15 * time.Second,
 	}
@@ -235,6 +267,65 @@ func (st *reverseProxyState) writeStatus(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(200)
 	_, _ = io.WriteString(w, sb.String())
+}
+
+// writeSelfStatus /status：网关自身状态（端口 / worker 数 / token 剩余 / 调试开关）
+// 全部在 Go 层算完直返，不进入 worker 队列，避免 worker 处理长流时排障端点被拖慢。
+func (st *reverseProxyState) writeSelfStatus(w http.ResponseWriter, port string) {
+	remain := tokenRemainSeconds(st.statusFile)
+	var sb strings.Builder
+	sb.WriteString(`{"ok":true,"service":"`)
+	sb.WriteString(escapeJSON(st.service))
+	sb.WriteString(`","port":`)
+	sb.WriteString(port)
+	sb.WriteString(`,"workers":`)
+	sb.WriteString(strconv.Itoa(len(st.targets)))
+	sb.WriteString(`,"tokenRemainSec":`)
+	sb.WriteString(strconv.FormatInt(remain, 10))
+	sb.WriteString(`,"debug":`)
+	sb.WriteString(strconv.FormatBool(st.debug))
+	sb.WriteString(`}`)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.WriteHeader(200)
+	_, _ = io.WriteString(w, sb.String())
+}
+
+// tokenRemainSeconds 读 OrcaTerm data.bin，取 oauth_access_token 的 JWT exp，返回剩余秒数。
+// 失败（文件缺失 / 非 JSON / 无 token / 无 exp）返回 -1，不阻断 /status。
+func tokenRemainSeconds(path string) int64 {
+	if path == "" {
+		return -1
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return -1
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return -1
+	}
+	tok, _ := data["oauth_access_token"].(string)
+	if tok == "" {
+		return -1
+	}
+	parts := strings.Split(tok, ".")
+	if len(parts) < 2 {
+		return -1
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return -1
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return -1
+	}
+	exp, ok := claims["exp"].(float64)
+	if !ok {
+		return -1
+	}
+	return int64(exp) - time.Now().Unix()
 }
 
 // serve 单请求处理：选 worker → 转发 → 失败换工重试

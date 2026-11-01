@@ -44,8 +44,13 @@ func (i *Inferencer) builtinType(name string) (Type, bool) {
 		// 连接(数组, 分隔符?) — 第二个参数可选
 		return TypeFunc{Params: []Type{TypeArray{Elem: elemT}, TStr}, Return: TStr, Variadic: true}, true
 	case "包含":
-		tv := i.newTypeVar()
-		return TypeFunc{Params: []Type{tv, tv}, Return: TBool}, true
+		// 容器与目标值是独立类型：字符串/数组/哈希的键均不要求同型。
+		containerT := i.newTypeVar()
+		valueT := i.newTypeVar()
+		return TypeFunc{Params: []Type{containerT, valueT}, Return: TBool}, true
+	case "取值":
+		// 取值(哈希, 键, 默认值?) — 第三参数可选，返回哈希值或默认值。
+		return TypeFunc{Params: []Type{THash, TStr, TAny}, Return: TAny, Optional: 1}, true
 
 	// --- 字符串处理 ---
 	case "大写":

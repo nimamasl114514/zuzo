@@ -111,6 +111,7 @@ func main() {
 	trace := false
 	debug := false
 	profile := false
+	jsonOut := false
 	var remaining []string
 	for _, a := range args {
 		switch a {
@@ -130,6 +131,9 @@ func main() {
 			trace = true // debug 自动启用 trace
 		case "--profile":
 			profile = true
+		case "--json":
+			// 机器可读诊断：只对 -c/--check 有意义（stdout 输出 JSON 数组，人读文本走 stderr）
+			jsonOut = true
 		default:
 			remaining = append(remaining, a)
 		}
@@ -151,6 +155,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if jsonOut && args[0] != "-c" && args[0] != "--check" {
+		fmt.Fprintln(os.Stderr, "错误: --json 仅用于 -c/--check 的静态检查输出")
+		os.Exit(2)
+	}
+
 	switch args[0] {
 	case "-e", "--eval":
 		if len(args) < 2 {
@@ -163,7 +172,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "错误: 请提供要检查的文件")
 			os.Exit(1)
 		}
-		checkFile(args[1])
+		checkFile(args[1], jsonOut)
 	case "-a", "--analyze":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "错误: 请提供要分析的文件")
@@ -375,17 +384,40 @@ func analyzeCode(source, fileHint string) {
 }
 
 // checkFile 对源文件进行静态类型检查（不执行）
-func checkFile(path string) {
+// jsonOut 为 true 时 stdout 只出 JSON 数组，人读文本一律走 stderr；退出码不变。
+func checkFile(path string, jsonOut bool) {
 	source, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: 无法读取文件 %s: %v\n", path, err)
+		if jsonOut {
+			// 读文件失败不是诊断，但 stdout 仍保持「合法 JSON 数组」契约，免得消费者解析失败
+			writeJSONDiag(diagnostic.New(), path)
+		}
 		os.Exit(1)
 	}
-	checkCode(encoding.NormalizeSource(source), path)
+	checkCode(encoding.NormalizeSource(source), path, jsonOut)
+}
+
+// emitDiag 按输出模式输出诊断：人读文本总是走 stderr，JSON 只走 stdout。
+// 这样 `-c` 的文本与退出码与旧版完全一致，`-c --json` 的 stdout 又可以直接喂给编辑器/CI。
+func emitDiag(diag *diagnostic.Report, filename string, jsonOut bool) {
+	if text := diag.Render(); text != "" {
+		fmt.Fprint(os.Stderr, text)
+	}
+	if jsonOut {
+		writeJSONDiag(diag, filename)
+	}
+}
+
+// writeJSONDiag 把诊断写成 JSON 数组到 stdout（零诊断即 []），编码失败只降级为 stderr 提示。
+func writeJSONDiag(diag *diagnostic.Report, filename string) {
+	if err := diag.WriteJSON(os.Stdout, filename); err != nil {
+		fmt.Fprintf(os.Stderr, "错误: 诊断 JSON 编码失败: %v\n", err)
+	}
 }
 
 // checkCode 对源代码进行静态类型检查
-func checkCode(source, filename string) {
+func checkCode(source, filename string, jsonOut bool) {
 	compileFile = filename
 	l := lexer.New(source)
 	p := parser.New(l)
@@ -400,7 +432,7 @@ func checkCode(source, filename string) {
 		// 语法有错误，但继续进行类型检查以发现连锁错误
 		infer.CheckProgramWithDiagnostics(program, diag)
 		diag.Dedupe()
-		fmt.Fprint(os.Stderr, diag.Render())
+		emitDiag(diag, filename, jsonOut)
 		os.Exit(1)
 	}
 
@@ -417,11 +449,17 @@ func checkCode(source, filename string) {
 	}
 	diag.Dedupe()
 	if len(typeErrors) == 0 && undefCount == 0 && !diag.HasErrors() {
+		if jsonOut {
+			// 零诊断也必须是合法 JSON：输出 []，人读的 ✓ 提示改走 stderr
+			writeJSONDiag(diag, filename)
+			fmt.Fprintf(os.Stderr, "✓ %s 类型检查通过，未发现类型错误\n", filename)
+			return
+		}
 		fmt.Printf("✓ %s 类型检查通过，未发现类型错误\n", filename)
-	} else {
-		fmt.Fprint(os.Stderr, diag.Render())
-		os.Exit(1)
+		return
 	}
+	emitDiag(diag, filename, jsonOut)
+	os.Exit(1)
 }
 
 // startREPL 启动交互式读取-求值-输出循环
@@ -638,7 +676,7 @@ func printHelp() {
   zuzo <文件.hypy>  执行 zuzo + Python 混合源文件
   zuzo -e "代码"    执行内联代码
   zuzo -a <文件>    拓扑指纹分析（查重/死代码/CSE）
-  zuzo -c <文件>    静态类型检查
+  zuzo -c <文件>    静态类型检查（加 --json 输出机器可读 JSON 数组）
   zuzo --emit-c <文件.hy> [-o 出.c]   编译为 C 源码（C 后端）
   zuzo --emit-exe <文件.hy> [-o 出.exe]  编译为可执行文件（C → gcc）
   zuzo --help       显示帮助

@@ -64,6 +64,9 @@ func Compile(tu *TranslationUnit) (*Compiled, error) {
 	// 0. 启动 stub（PE 入口）
 	c.genStartupStub()
 
+	// 0.1 setjmp/longjmp 自带实现（不依赖 msvcrt 的 _setjmpex 与 PE 展开信息）
+	c.genJumpHelpers()
+
 	// 1. 全局变量
 	if err := c.genGlobals(); err != nil {
 		return nil, err
@@ -460,6 +463,9 @@ func (c *Compiler) genFunc(fd *FuncDecl) error {
 			sz = 8
 		}
 		fg.tmpTop -= int32(alignUp(sz, 8))
+		// 槽位按 16 字节对齐：x64 运行时里 jmp_buf 等结构要求 movaps 目标 16 对齐，
+		// 只按 8 对齐会让 执行/遇到 的 setjmp 在成员缓冲上崩（第30轮实测 mod16=8 → access violation）
+		fg.tmpTop &^= 15
 		fg.localOff[vd.Name] = fg.tmpTop
 	}
 
@@ -842,6 +848,12 @@ func (fg *funcGen) emitMemcpyReg(srcReg int, dstReg int, dstSlot int32, size int
 
 // callImport 调用外部导入函数（参数已按 ABI 放好）
 func (fg *funcGen) callImport(name string) {
+	// setjmp/longjmp 走自实现（见 jmp.go），不导入 msvcrt：
+	// msvcrt 的 setjmp 在 x64 上是 _setjmpex，需要调用方 .pdata，nativecc 不生成。
+	if name == "setjmp" || name == "longjmp" {
+		fg.a.CallLabel("__zuzo_" + name)
+		return
+	}
 	fg.c.imports[name] = true
 	fg.a.CallMem(importMem(name))
 }

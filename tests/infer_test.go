@@ -296,14 +296,20 @@ func TestInferArrayLiteral(t *testing.T) {
 	}
 }
 
-func TestInferArrayMixedTypeError(t *testing.T) {
-	// 数组中混合类型应该报错
+func TestInferArrayMixedTypeAllowed(t *testing.T) {
+	// zuzo 数组是动态容器（第30轮 T30.1 口径）：混值字面量合法，
+	// 元素类型退化为 任意，不再按首元素类型强行统一。
 	input := `[1, 2, "hello"]`
 	inf := infer.New()
 	prog := parseExpr(input)
 	inf.Infer(prog)
-	if len(inf.Errors()) == 0 {
-		t.Error("期望类型错误（数组混合类型），但没有报错")
+	if len(inf.Errors()) != 0 {
+		t.Fatalf("混值数组不应报错，得到 %v", inf.Errors())
+	}
+	exprStmt := prog.Statements[0].(*ast.ExpressionStatement)
+	got := infer.ResolvedType(inf.NodeTypes[exprStmt.Expression]).String()
+	if got != "数组[任意]" {
+		t.Errorf("期望 数组[任意], 得到 %s", got)
 	}
 }
 

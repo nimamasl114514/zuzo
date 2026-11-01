@@ -144,6 +144,16 @@ nativecc 自身只承诺受控 C 子集，不承诺完整 ISO C、通用 Windows
 1. **`.rdata` 必须可写**：导入表 IAT 与字符串常量同处 `.rdata`，加载器要在 `LdrProcessInitializationComplete` 阶段写 IAT。若该段标只读，字符串常量多于约 20 个（IAT 被挤到 `0x1000` 页边界附近）时进程启动即崩。已改为 `0xC0000040`，并由 `nativecc/iat_rodata_test.go` 守门。
 2. **外部 CRT 多参调用传参不可靠**：`memset(dst, c, n)` / `memcpy(dst, src, n)` 这类三参外部调用实测会写越界（第26轮修的是自家函数调用的栈参数装载，未覆盖外部函数）。当前规避：zuzo 运行时内不用 `memset`/`memcpy`，改显式循环；待修。
 
+### 第30轮：`执行/遇到` 在 native 后端落地
+
+三处根因，缺一不可：
+
+1. **`jmp_buf` 尺寸**：CRT 头里原先写成 `char jmp_buf[16]`（16 字节），而 msvcrt x64 的 `_JUMP_BUFFER` 是 **256 字节**（12 个 GPR/控制槽 + XMM6-XMM15 + MxCsr）。尺寸偏小时 `_setjmp` 直接越界写栈 → 首次调用就 access violation。已改为 `long long jmp_buf[32]`。
+2. **栈槽 16 字节对齐**：结构体成员里的 `jmp_buf` 若只按 8 字节对齐，`_setjmp` 保存 XMM 的 `movaps` 会因目标不对齐触发 #GP。`codegen.go` 的局部槽分配现在按 16 字节向下对齐（`tmpTop &^= 15`），实测 `mod16` 从 8 变 0。
+3. **不导入 msvcrt 的 setjmp**：x64 的 `setjmp` 走 `_setjmpex`，需要调用方的 PE 展开信息（`.pdata`）才能 `RtlUnwind`；nativecc 不生成 `.pdata`，实测抛 `0xc00000ff`。改为 **自带实现**（`nativecc/jmp.go`）：`__zuzo_setjmp` 只保存返回地址、rsp、rbp/rbx/rsi/rdi/r12-r15，`__zuzo_longjmp` 恢复后 `jmp`，不触碰 SEH。
+
+覆盖：`tests_c/t21_try.hy` 三链（解释器 / gcc 产物 / nativecc 产物）逐字节一致，`NATIVE-CC PASS=20 FAIL=0`。未保存 XMM6-XMM15：生成的 zuzo 代码不跨 `执行/遇到` 持有浮点活跃值；若将来出现，需要在 `jmp.go` 里补 `movups`。
+
 ## 六、排障与观测
 
 ```bash

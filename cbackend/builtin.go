@@ -77,6 +77,26 @@ func (g *Gen) genBuiltinCall(name string, n *ast.CallExpression) (string, bool, 
 		}
 		return "z_to_float(" + vals[0] + ")", true, nil
 
+	// 错误对象内省：C 后端的错误值在 执行/遇到 里是字符串载体，
+	// 错误码/消息从运行时全局取（最近一次 z_die 写入）；错误行在 C 后端不可知，返回 0。
+	case "错误码":
+		if err := need(1, 1); err != nil {
+			return "", true, err
+		}
+		return "z_str(z_error_code())", true, nil
+
+	case "错误信息":
+		if err := need(1, 1); err != nil {
+			return "", true, err
+		}
+		return "z_str(z_error_msg())", true, nil
+
+	case "错误行":
+		if err := need(1, 1); err != nil {
+			return "", true, err
+		}
+		return "z_int(0)", true, nil
+
 	case "类型":
 		if err := need(1, 1); err != nil {
 			return "", true, err

@@ -102,6 +102,7 @@ type TypeFunc struct {
 	Params   []Type
 	Return   Type
 	Variadic bool // 是否可变参数
+	Optional int  // 末尾可选参数个数（与 Variadic 互斥）
 }
 
 func (t TypeFunc) String() string {
@@ -663,10 +664,18 @@ func (i *Inferencer) inferExpr(expr ast.Expression) Type {
 		t = retT
 
 	case *ast.ArrayLiteral:
-		elemT := i.newTypeVar()
+		// zuzo 数组是动态容器，允许 [1, "x", 真] 这类混值字面量。
+		// 同型元素保留精确元素类型；出现不同类型时退化为 任意，
+		// 不再把首元素类型当成整个数组的强制约束。
+		elemTypes := make([]Type, 0, len(n.Elements))
 		for _, elem := range n.Elements {
-			elemType := i.inferExpr(elem)
-			i.addConstraint(elemT, elemType, n)
+			elemTypes = append(elemTypes, i.inferExpr(elem))
+		}
+		var elemT Type
+		if len(elemTypes) == 0 {
+			elemT = i.newTypeVar()
+		} else {
+			elemT = commonArrayElemType(elemTypes)
 		}
 		t = TypeArray{Elem: elemT}
 
@@ -800,6 +809,51 @@ func unify(a, b Type, errors *[]TypeError, c Constraint) bool {
 	fa, okA := a.(TypeFunc)
 	fb, okB := b.(TypeFunc)
 	if okA && okB {
+		// 末尾可选参数：实参数量只需落在 [必选, 全部] 区间。
+		// 例：取值(哈希, 键, 默认值?) 的 Params 为 3、Optional 为 1。
+		if fa.Optional > 0 || fb.Optional > 0 {
+			if fa.Variadic || fb.Variadic {
+				line, col := getNodePosition(c.Node)
+				*errors = append(*errors, TypeError{Code: ErrCodeArgCount, Message: "函数签名不能同时声明可选参数与可变参数", Line: line, Column: col})
+				return false
+			}
+			checkOptionalArity := func(signature, call TypeFunc) bool {
+				if signature.Optional == 0 {
+					return true
+				}
+				minArgs := len(signature.Params) - signature.Optional
+				actual := len(call.Params)
+				if actual >= minArgs && actual <= len(signature.Params) {
+					return true
+				}
+				line, col := getNodePosition(c.Node)
+				*errors = append(*errors, TypeError{
+					Code:    ErrCodeArgCount,
+					Message: fmt.Sprintf("参数数量不匹配: 期望 %d-%d 个参数，得到 %d 个", minArgs, len(signature.Params), actual),
+					Line:    line,
+					Column:  col,
+				})
+				return false
+			}
+			ok := checkOptionalArity(fa, fb)
+			if !checkOptionalArity(fb, fa) {
+				ok = false
+			}
+			commonLen := len(fa.Params)
+			if len(fb.Params) < commonLen {
+				commonLen = len(fb.Params)
+			}
+			for idx := 0; idx < commonLen; idx++ {
+				if !unifyParam(fa.Params[idx], fb.Params[idx], idx, errors, c) {
+					ok = false
+				}
+			}
+			if !unify(fa.Return, fb.Return, errors, c) {
+				ok = false
+			}
+			return ok
+		}
+
 		// 可变参数处理：如果任意一方是可变参数，放宽参数数量检查
 		if fa.Variadic || fb.Variadic {
 			// 计算固定参数数量（去掉可变参数占位的最后一个）
@@ -985,6 +1039,32 @@ func isNumeric(t Type) bool {
 	return false
 }
 
+// commonArrayElemType 计算数组字面量的保守公共元素类型。
+// 只有元素类型明确一致（或都属于数值）时才保留精确类型；
+// 其他情况返回 任意，避免动态数组产生静态假阳。
+func commonArrayElemType(types []Type) Type {
+	common := types[0].resolved()
+	for _, raw := range types[1:] {
+		current := raw.resolved()
+		if common == TAny || current == TAny {
+			common = TAny
+			continue
+		}
+		if typeEqual(common, current) {
+			continue
+		}
+		if isNumeric(common) && isNumeric(current) {
+			if common == TFloat || current == TFloat {
+				common = TFloat
+			}
+			continue
+		}
+		// 未定型元素不做强行统一；保守退化为动态元素。
+		return TAny
+	}
+	return common
+}
+
 func typeEqual(a, b Type) bool {
 	a = a.resolved()
 	b = b.resolved()
@@ -1015,6 +1095,9 @@ func typeEqual(a, b Type) bool {
 	}
 	if fa, ok := a.(TypeFunc); ok {
 		if fb, ok := b.(TypeFunc); ok {
+			if fa.Optional != fb.Optional {
+				return false
+			}
 			// 可变参数函数：只要固定参数部分匹配即可
 			if fa.Variadic || fb.Variadic {
 				minLen := len(fa.Params)

@@ -328,11 +328,9 @@ func (g *Gen) genCall(n *ast.CallExpression) (string, error) {
 		if args, ok, err := g.genBuiltinCall(ident.Value, n); ok {
 			return args, err
 		}
-		// 变量里存的是函数 → 走 z_call（含顶层变量：c() 里 c 是全局闭包）
-		if slot, ok := g.lookupVar(ident.Value); ok || g.globals[ident.Value] {
-			fnRef := ident.Value
-			_ = slot
-			f, err := g.genIdent(fnRef)
+		// 作用域内的局部变量/参数永远遮蔽同名函数：变量里存的是函数 → 走 z_call
+		if _, ok := g.lookupVar(ident.Value); ok {
+			f, err := g.genIdent(ident.Value)
 			if err != nil {
 				return "", err
 			}
@@ -342,8 +340,15 @@ func (g *Gen) genCall(n *ast.CallExpression) (string, error) {
 		if _, ok := g.defines[ident.Value]; ok {
 			return fmt.Sprintf("zdef_%s(0, NULL, NULL)", sanitizeIdent(ident.Value)), nil
 		}
-		// 具名函数直接调用
+		// 具名函数直接调用；与顶层变量同名时按「后定义者胜」裁决（与解释器一致）
 		if fi, ok := g.funcs[ident.Value]; ok {
+			if g.globals[ident.Value] && g.globalLine[ident.Value] > fi.Node.Token.Line {
+				f, err := g.genIdent(ident.Value)
+				if err != nil {
+					return "", err
+				}
+				return g.genApply(f, n)
+			}
 			var args []string
 			for _, a := range n.Arguments {
 				v, err := g.genExpr(a)
@@ -369,6 +374,14 @@ func (g *Gen) genCall(n *ast.CallExpression) (string, error) {
 				return fmt.Sprintf("%s(0, NULL, %s)", fi.CName, envArg), nil
 			}
 			return fmt.Sprintf("%s(%d, (ZVal[]){%s}, %s)", fi.CName, len(args), strings.Join(args, ", "), envArg), nil
+		}
+		// 顶层变量里存的是函数值（含全局闭包）
+		if g.globals[ident.Value] {
+			f, err := g.genIdent(ident.Value)
+			if err != nil {
+				return "", err
+			}
+			return g.genApply(f, n)
 		}
 		return "", fmt.Errorf("未定义的函数: %s", ident.Value)
 	}

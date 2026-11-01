@@ -306,7 +306,10 @@ func InitBuiltinPool(builtins map[string]BuiltinFunction) {
 			builtinPool[name] = &Builtin{
 				Fn:             fn,
 				Name:           name,
-				AllowErrorArgs: name == "错误码" || name == "错误信息" || name == "错误行",
+				// 错误内省系列 + 通用转换：允许把捕获到的错误对象当普通值处理，
+				// 否则 执行 { ... } 遇到 e { 打印(字符串(e)) } 会再次把错误抛出去。
+				AllowErrorArgs: name == "错误码" || name == "错误信息" || name == "错误行" ||
+					name == "字符串" || name == "类型",
 			}
 		}
 	})

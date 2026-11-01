@@ -257,12 +257,22 @@ static int64_t z_utf8_len(const char* s, int64_t bytes) {
 ZTryFrame* z_try_top = NULL;
 ZVal z_error_value;
 
+/* 结构化错误码/消息：z_die 每次写入，执行/遇到 的处理分支里由 错误码()/错误信息() 读取。
+   用静态缓冲区而非 ZVal，避免在错误传播路径上再触发一次堆分配。 */
+static char z_err_code_buf[32] = "";
+static char z_err_msg_buf[1024] = "";
+
+const char* z_error_code(void) { return z_err_code_buf; }
+const char* z_error_msg(void)  { return z_err_msg_buf; }
+
 ZVal z_error_take(void) { return z_error_value; }
 
 void z_die(const char* code, const char* msg) {
     char buf[1024];
     if (code && code[0]) snprintf(buf, sizeof(buf), "错误 %s: %s", code, msg);
     else                 snprintf(buf, sizeof(buf), "错误: %s", msg);
+    snprintf(z_err_code_buf, sizeof(z_err_code_buf), "%s", code ? code : "");
+    snprintf(z_err_msg_buf, sizeof(z_err_msg_buf), "%s", msg ? msg : "");
     if (z_try_top != NULL) {
         /* 有 `执行/遇到` 帧：抛成错误对象并跳转，不终止进程 */
         z_error_value = z_str(buf);
@@ -282,7 +292,7 @@ void z_check_arith(int overflow, const char* op) {
 }
 
 void z_check_div(int64_t divisor) {
-    if (divisor == 0) z_die("E211", "除零错误");
+    if (divisor == 0) z_die("E202", "除零错误");
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -474,7 +484,7 @@ void z_println(void) { fputc('\n', stdout); }
 static double z_as_float(ZVal v) {
     if (v.kind == ZK_INT) return (double)v.as.i;
     if (v.kind == ZK_FLOAT) return v.as.f;
-    z_die("E202", "期望数值类型");
+    z_die("E204", "期望数值类型");
     return 0;
 }
 
@@ -504,7 +514,7 @@ ZVal z_add(ZVal a, ZVal b) {
         p[n] = 0;
         return z_str_take(p, n);
     }
-    z_die("E203", "运算符 '+' 不支持类型");
+    z_die("E204", "运算符 '+' 不支持类型");
     return z_null();
 }
 
@@ -515,7 +525,7 @@ ZVal z_sub(ZVal a, ZVal b) {
         return z_int(r);
     }
     if (z_is_num(a) && z_is_num(b)) return z_float(z_as_float(a) - z_as_float(b));
-    z_die("E203", "运算符 '-' 不支持类型");
+    z_die("E204", "运算符 '-' 不支持类型");
     return z_null();
 }
 
@@ -526,37 +536,37 @@ ZVal z_mul(ZVal a, ZVal b) {
         return z_int(r);
     }
     if (z_is_num(a) && z_is_num(b)) return z_float(z_as_float(a) * z_as_float(b));
-    z_die("E203", "运算符 '*' 不支持类型");
+    z_die("E204", "运算符 '*' 不支持类型");
     return z_null();
 }
 
 ZVal z_div(ZVal a, ZVal b) {
     if (a.kind == ZK_INT && b.kind == ZK_INT) {
-        if (b.as.i == 0) z_die("E211", "除零错误");
+        if (b.as.i == 0) z_die("E202", "除零错误");
         if (a.as.i == INT64_MIN && b.as.i == -1) z_die("E210", "整数溢出");
         return z_int(a.as.i / b.as.i);
     }
     if (z_is_num(a) && z_is_num(b)) {
         double y = z_as_float(b);
-        if (y == 0.0) z_die("E211", "除零错误");
+        if (y == 0.0) z_die("E202", "除零错误");
         return z_float(z_as_float(a) / y);
     }
-    z_die("E203", "运算符 '/' 不支持类型");
+    z_die("E204", "运算符 '/' 不支持类型");
     return z_null();
 }
 
 ZVal z_mod(ZVal a, ZVal b) {
     if (a.kind == ZK_INT && b.kind == ZK_INT) {
-        if (b.as.i == 0) z_die("E212", "取模零错误");
+        if (b.as.i == 0) z_die("E203", "取模零错误");
         if (a.as.i == INT64_MIN && b.as.i == -1) z_die("E210", "整数溢出");
         return z_int(a.as.i % b.as.i);
     }
     if (z_is_num(a) && z_is_num(b)) {
         double y = z_as_float(b);
-        if (y == 0.0) z_die("E212", "取模零错误");
+        if (y == 0.0) z_die("E203", "取模零错误");
         return z_float(fmod(z_as_float(a), y));
     }
-    z_die("E203", "运算符 '%' 不支持类型");
+    z_die("E204", "运算符 '%' 不支持类型");
     return z_null();
 }
 
@@ -566,7 +576,7 @@ ZVal z_neg(ZVal a) {
         return z_int(-a.as.i);
     }
     if (a.kind == ZK_FLOAT) return z_float(-a.as.f);
-    z_die("E203", "一元 '-' 不支持类型");
+    z_die("E204", "一元 '-' 不支持类型");
     return z_null();
 }
 
@@ -592,7 +602,7 @@ static int z_cmp(ZVal a, ZVal b) {
         return 0;
     }
     if (a.kind == ZK_STR && b.kind == ZK_STR) return z_str_cmp(a.as.s, b.as.s);
-    z_die("E203", "比较运算不支持类型");
+    z_die("E204", "比较运算不支持类型");
     return 0;
 }
 

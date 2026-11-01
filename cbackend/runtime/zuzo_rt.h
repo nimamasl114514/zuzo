@@ -210,6 +210,10 @@ typedef struct ZTryFrame {
 extern ZTryFrame* z_try_top;
 extern ZVal z_error_value;
 ZVal z_error_take(void);
+/* 结构化错误码与消息：最近一次 z_die 写入，供 错误码()/错误信息() 读取。
+   C 后端的错误值只携带人读文本，错误码走这两个访问器（与解释器口径对齐）。 */
+const char* z_error_code(void);
+const char* z_error_msg(void);
 
 /* ── 文本命名空间（第22轮核心子集）─────────────── */
 ZVal zs_upper(ZVal s);
