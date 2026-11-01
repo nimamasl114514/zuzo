@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 
+	"zuzo/ast"
 	"zuzo/object"
 	"zuzo/pyext"
 )
@@ -384,3 +385,107 @@ func PyBridgeActive() bool { return pyBridge().Active() }
 
 // PyBridgeActivate 给 mix 层在命中 C 扩展时激活子进程
 func PyBridgeActivate() error { return pyBridge().Activate() }
+
+// ==================== 语法级调用（a.b / a.b(...) / df["列"]） ====================
+
+// evalPyIndexExpression 处理 Python 句柄的成员访问与下标
+//   - 字符串键 = 取属性（编译期 a.b 已被解析成 a["b"]）
+//   - 其他键 = __getitem__（df["列"] / a[0]）
+func evalPyIndexExpression(node ast.Node, base *object.PyObj, key object.Object) object.Object {
+	b := pyBridge()
+	if s, ok := key.(*object.String); ok {
+		// 先当属性取（np.pi / a.shape）；失败再当映射键取（dict["键"] / df["列"]）
+		if v, err := b.GetAttr(base, s.Value); err == nil {
+			return v
+		}
+		if v, err := pyGetItem(base, s); err == nil {
+			return v
+		}
+		v, err := b.GetAttr(base, s.Value)
+		if err != nil {
+			return newErrorWithNode(node, "E912", "%v", err)
+		}
+		return v
+	}
+	fn, err := b.GetAttr(base, "__getitem__")
+	if err != nil {
+		return newErrorWithNode(node, "E912", "%v", err)
+	}
+	fno, ok := fn.(*object.PyObj)
+	if !ok {
+		return newErrorWithNode(node, "E913", "Python 对象不支持下标访问")
+	}
+	v, err := b.Call(fno, []object.Object{key}, nil)
+	if err != nil {
+		return newErrorWithNode(node, "E912", "%v", err)
+	}
+	return v
+}
+
+// callPyObject 调用 Python 可调用句柄（位置参数 + 具名参数）
+func callPyObject(node ast.Node, fn *object.PyObj, args []object.Object, named map[string]object.Object) object.Object {
+	if !fn.Callable {
+		return newErrorWithNode(node, "E912", "Python 对象不可调用：%s", fn.Repr)
+	}
+	if e := checkTransferable("调用", args); e != nil {
+		return e
+	}
+	for _, v := range named {
+		if e := checkTransferable("调用", []object.Object{v}); e != nil {
+			return e
+		}
+	}
+	v, err := pyBridge().Call(fn, args, named)
+	if err != nil {
+		return newErrorWithNode(node, "E912", "%v", err)
+	}
+	return v
+}
+
+// pyGetItem 走 __getitem__ 取一次
+func pyGetItem(base *object.PyObj, key object.Object) (object.Object, error) {
+	b := pyBridge()
+	fnv, err := b.GetAttr(base, "__getitem__")
+	if err != nil {
+		return nil, err
+	}
+	fno, ok := fnv.(*object.PyObj)
+	if !ok || !fno.Callable {
+		return nil, fmt.Errorf("对象没有 __getitem__")
+	}
+	return b.Call(fno, []object.Object{key}, nil)
+}
+
+// setPyIndex 给 Python 对象的成员/下标赋值
+func setPyIndex(base *object.PyObj, key, val object.Object) *object.Error {
+	b := pyBridge()
+	if s, ok := key.(*object.String); ok {
+		// 先当映射键写（df["列"] = … / dict["键"] = …）；没有 __setitem__ 再当属性写
+		if _, err := pyGetItem(base, nil); err == nil {
+			_ = err
+		}
+		if fnv, err := b.GetAttr(base, "__setitem__"); err == nil {
+			if fno, ok := fnv.(*object.PyObj); ok && fno.Callable {
+				if _, err := b.Call(fno, []object.Object{s, val}, nil); err == nil {
+					return nil
+				}
+			}
+		}
+		if err := b.SetAttr(base, s.Value, val); err != nil {
+			return pyErr("E912", "%v", err)
+		}
+		return nil
+	}
+	fn, err := b.GetAttr(base, "__setitem__")
+	if err != nil {
+		return pyErr("E912", "%v", err)
+	}
+	fno, ok := fn.(*object.PyObj)
+	if !ok {
+		return pyErr("E913", "Python 对象不支持下标赋值")
+	}
+	if _, err := b.Call(fno, []object.Object{key, val}, nil); err != nil {
+		return pyErr("E912", "%v", err)
+	}
+	return nil
+}

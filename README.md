@@ -23,7 +23,7 @@
 - **字符串标准库**：内建 `文本` 命名空间（110 成员：大小写 / 裁剪 / 查找替换 / 分割 / 对齐 / 判定 / 子串 / 中文友好 / UTF-8・编码・正则）+ `libs/strings` 高层封装（统计 / 表格 / 命名法 / 模板 / 千分位）
 - **工具链**：`zpm` 包管理器、类型检查 `--check`、拓扑指纹分析 `--analyze`、影子模式 `--shadow`、CPU 采样 `ZUZO_CPUPROFILE`
 - **LLVM 后端**：`--emit-llvm` 直接生成文本 LLVM IR、`--emit-exe` 走 clang 产出原生 exe；与解释器逐字节对拍（20/20），详见 [LLVM 后端](docs/llvm-backend.md)
-- **CPython 子进程桥**：`py导入("numpy")` 即可在 `.hy` 里直接用本机 Python 库（含 numpy / pandas 这类 C 扩展），句柄引用 + 容器快照，老代码 `py求值/py执行` 命中 `.pyd` 时自动降级并粘住子进程模式；详见 [Python 子进程桥](docs/python-bridge.md)
+- **CPython 子进程桥**：`变量 np = py导入("numpy")` 之后**点号直调** `np.array([1,2,3]).sum()`（`zuzo pip install` 装包，装完即用）（含 numpy / pandas 这类 C 扩展），句柄引用 + 容器快照，老代码 `py求值/py执行` 命中 `.pyd` 时自动降级并粘住子进程模式；详见 [Python 子进程桥](docs/python-bridge.md)
 
 ## 快速开始
 
@@ -116,11 +116,11 @@ print(总)
 ./run_tests.sh        # Python 语义与 CPython 逐字节对拍（33 用例）
 ./run_tests_mix.sh    # 混合语言 golden（15 用例）
 ./run_tests_llvm.sh   # LLVM 后端对拍（20 用例）
-./run_tests_bridge.sh # CPython 子进程桥对拍（15 用例：numpy / pandas / requests / 错误 / 句柄）
+./run_tests_bridge.sh # CPython 子进程桥对拍（17 用例：numpy / pandas / requests / 错误 / 句柄）
 go test ./...         # Go 单测（含原生循环、SAP、混合切块）
 ```
 
-当前状态（2026-11-01 实测）：`run_tests` **33/33 通过**，且 `--shadow` 影子模式 **33/33 双轨一致**；`run_tests_mix` **15/15**；`run_tests_llvm` **20/20**·`run_tests_bridge` **15/15**；`projects/mini_scheme` 解释器与 LLVM 产物均 **31/31**；Go 单测覆盖 `ast` / `evaluator` / `fuzz` / `mix` / `tests`。
+当前状态（2026-11-01 实测）：`run_tests` **33/33 通过**，且 `--shadow` 影子模式 **33/33 双轨一致**；`run_tests_mix` **15/15**；`run_tests_llvm` **20/20**·`run_tests_bridge` **17/17**；`projects/mini_scheme` 解释器与 LLVM 产物均 **31/31**；Go 单测覆盖 `ast` / `evaluator` / `fuzz` / `mix` / `tests`。
 
 ## 文档
 

@@ -55,6 +55,8 @@ print(zuzo.调用("长度", [1,2,3])) # 3
 >
 > 做法：起一个**本机 CPython 子进程**当服务端（`pyext/child.py`），zuzo 侧用 Go 客户端（`pyext/client.go`）通过 **JSON Lines over stdio** 通信。于是 `.hy` 里拿到的是「真 CPython 里的对象句柄」，库怎么装、`.pyd` 怎么加载全交给 CPython 自己。
 
+> 写起来最省事的形态是**点号直调**（第32轮）：`np.array([1,2,3]).sum()`、`df["列"].mean()`、`df["新列"] = [1,2,3]`、关键字参数 `json.dumps(x, ensure_ascii: 假)`。下面 5.1 的内置是点号不可用时的等价通道（动态方法名、句柄存在容器里等）。
+
 ### 5.1 新增内置（14 个）
 
 | 内置 | 作用 | 典型写法 |

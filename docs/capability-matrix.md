@@ -54,9 +54,9 @@ zuzo 当前是一个**单二进制交付的脚本/服务端运行时**：能用�
 
 | # | 场景 | 命令（项目根目录执行） | 实测输出 |
 |---|---|---|---|
-| 1 | 导入模块 + 句柄 + 桥信息 | `./zuzo.exe -e '变量 np = py导入("numpy"); 打印(py描述(np)); 打印(py信息())'` | `<module 'numpy' from '...\site-packages\numpy\__init__.py'>`<br>`{版本: 3.12.13, 解释器: ...\python-env\python.exe, 实现: CPython, 模式: 子进程, 调用次数: 4, 失败次数: 0, 运行秒数: 0.1135566}` |
-| 2 | ndarray 构造 + 归约 | `./zuzo.exe -e '变量 np = py导入("numpy"); 变量 a = py方法(np, "arange", 12); 变量 m = py方法(py方法(a, "reshape", 3, 4), "sum"); 打印(m); 打印(类型(m))'` | `66`<br>`整数`（numpy 标量按 `item()` 解包成 int64） |
-| 3 | DataFrame 分组求和 + 快照 | `./zuzo.exe -e '变量 pd = py导入("pandas"); 变量 df = py方法(pd, "DataFrame", {"城市": ["北京", "上海", "上海"], "销量": [3, 5, 2]}); 打印(py取值(py方法(py方法(df, "groupby", "城市"), "sum"))); 打印(类型(py取值(df)))'` | `[{销量: 7}, {销量: 3}]`<br>`数组`（`py取值` = `to_dict("records")` 快照，索引不保留） |
+| 1 | 导入模块 + 点号直调 + 桥信息 | `./zuzo.exe -e '变量 np = py导入("numpy"); 打印(np.array([1,2,3]).sum()); 打印(py信息())'` | `6`<br>`{版本: 3.12.13, 解释器: ...\python-env\python.exe, 实现: CPython, 模式: 子进程, 调用次数: 7, 失败次数: 0, 运行秒数: 0.1062932}` |
+| 2 | ndarray 构造 + 归约（点号） | `./zuzo.exe -e '变量 np = py导入("numpy"); 变量 a = np.arange(12); 打印(a.reshape(3,4).sum()); 打印(类型(a.reshape(3,4).sum()))'` | `66`<br>`整数`（numpy 标量按 `item()` 解包成 int64） |
+| 3 | DataFrame 分组求和（点号 + 下标赋值） | `./zuzo.exe -e '变量 pd = py导入("pandas"); 变量 df = pd.DataFrame({"城市": ["北京","上海","上海"], "销量": [3,5,2]}); df["新列"] = [1,1,1]; 打印(df.groupby("城市").sum().reset_index().to_dict("records")); 打印(df.shape)'` | `[{城市: 上海, 销量: 7, 新列: 2}, {城市: 北京, 销量: 3, 新列: 1}]`<br>`[3, 3]` |
 | 4 | 老代码自动降级（粘性） | `./zuzo.exe -e 'py执行("import numpy as np"); 打印(py求值("int(np.arange(5).sum())")); 打印(py模式())'` | `10`<br>`子进程`（纯 Go 运行时失败 → 自动拉起 CPython → 重放 → 粘住） |
 | 5 | 错误路径 | `./zuzo.exe -e 'py导入("zuzo_no_such_module_xyz")'` | 退出码 1；`✘ 根因 [E912]: Python ModuleNotFoundError: No module named 'zuzo_no_such_module_xyz'` + 子进程 traceback |
 

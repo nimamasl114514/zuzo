@@ -829,6 +829,11 @@ func evalAssignExpression(node *ast.AssignExpression, env *object.Environment) o
 				return newErrorWithNode(node, diagnostic.ErrInvalidIndexType.Code, "实例属性必须是字符串")
 			}
 			c.Props[key.Value] = val
+		case *object.PyObj:
+			// 第32轮：df["列"] = 值 / df.列 = 值
+			if e := setPyIndex(c, index, val); e != nil {
+				return newErrorWithNode(node, "E912", "%s", e.Message)
+			}
 		default:
 			return newErrorWithNode(node, diagnostic.ErrUnsupportedOperator.Code, "不支持对类型 %s 进行元素赋值", container.Type())
 		}
@@ -887,6 +892,9 @@ func evalCallExpression(node *ast.CallExpression, env *object.Environment) objec
 		return enrichError(result)
 	case *object.Define:
 		return applyDefine(fn, namedArgs)
+	case *object.PyObj:
+		// 第32轮：直接调用 Python 可调用句柄（np.array(...) / a.sum()）
+		return callPyObject(node, fn, args, namedArgs)
 	default:
 		return newErrorWithNode(node, diagnostic.ErrNotCallableRuntime.Code, "不可调用的对象: %s", fn.Type())
 	}
@@ -1008,6 +1016,9 @@ func evalIndexExpression(node *ast.IndexExpression, env *object.Environment) obj
 		return evalCLibIndexExpression(node, left, index)
 	case left.Type() == object.CLIB_FUNC_OBJ:
 		return evalCFuncIndexExpression(node, left, index)
+	case left.Type() == object.PY_OBJ:
+		// 第32轮：Python 句柄的成员/下标（np.array / df["列"]）
+		return evalPyIndexExpression(node, left.(*object.PyObj), index)
 	default:
 		return newErrorWithNode(node, diagnostic.ErrUnsupportedOperator.Code, "不支持对类型 %s 使用索引操作", left.Type())
 	}
