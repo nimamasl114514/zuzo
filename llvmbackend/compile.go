@@ -131,7 +131,7 @@ func EmitLLVM(path string) (string, *ast.Program, error) {
 		}
 		fmt.Fprint(os.Stderr, warnText)
 	}
-	code, err := Generate(prog, Options{SourcePath: path, Strict: strictTypes})
+	code, err := Generate(prog, Options{SourcePath: path, Strict: strictTypes, Target: os.Getenv("ZUZO_TARGET")})
 	if err != nil {
 		return "", prog, err
 	}
@@ -199,7 +199,11 @@ func copyFile(src, dst string) error {
 }
 
 // BuildExe 把源码编译为可执行文件：IR → clang -c → 链接运行时 obj。
+// 跨平台（ZUZO_TARGET 与宿主不一致）只支持 --emit-llvm：本机缺少目标平台的 CRT 与链接器。
 func BuildExe(srcPath, outExe string) (llPath string, exePath string, err error) {
+	if v := strings.TrimSpace(os.Getenv("ZUZO_TARGET")); v != "" && v != hostTriple() {
+		return "", "", fmt.Errorf("跨平台目标 %q 只能生成 IR（--emit-llvm）；生成 exe 需要目标平台的 CRT 与链接器", v)
+	}
 	clang, err := FindClang()
 	if err != nil {
 		return "", "", err

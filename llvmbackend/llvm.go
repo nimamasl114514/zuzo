@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,41 @@ type Options struct {
 	SourcePath string
 	KeepTemp   bool
 	Strict     bool
+	// Target 目标三元组（空 = 按宿主平台推导，可用 ZUZO_TARGET 覆盖）
+	Target string
+}
+
+// defaultTriple 取目标 triple：ZUZO_TARGET 优先，否则按宿主平台推导。
+func defaultTriple() string {
+	if v := strings.TrimSpace(os.Getenv("ZUZO_TARGET")); v != "" {
+		return v
+	}
+	return hostTriple()
+}
+
+// hostTriple 按宿主平台推导 LLVM target triple。
+func hostTriple() string {
+	switch runtime.GOOS {
+	case "windows":
+		if runtime.GOARCH == "amd64" {
+			return "x86_64-pc-windows-msvc"
+		}
+	case "linux":
+		switch runtime.GOARCH {
+		case "amd64":
+			return "x86_64-unknown-linux-gnu"
+		case "arm64":
+			return "aarch64-unknown-linux-gnu"
+		}
+	case "darwin":
+		switch runtime.GOARCH {
+		case "arm64":
+			return "arm64-apple-macosx11.0.0"
+		case "amd64":
+			return "x86_64-apple-macosx10.15.0"
+		}
+	}
+	return "x86_64-pc-windows-msvc"
 }
 
 // Value 是一个 ptr 类型的 SSA 值，指向一个 %ZVal 槽位。

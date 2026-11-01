@@ -105,3 +105,25 @@ go test ./...         # Go 单测（含 while 原生循环 10 个双路对拍用
 - 解析侧约 30% 采样在 GC（token 字符串分配）；进一步优化需 token 复用/arena。
 - Python 变量查找仍走 `map[string]Object`；改槽位需重构 py/object 层。
 - 混合模式下含函数定义的 zuzo 块不走块级 SAP。
+## 七、LLVM 后端基准（2026-11-01 第31轮实测）
+
+命令：`python bench/llvmbackend/bench.py 3`（3 轮取中位数，解释器 = SAP 默认档，LLVM 产物 = `--emit-exe` + clang -O2）。
+
+| 用例 | 解释器 | LLVM 产物 | 加速比 | 输出 |
+|---|---|---|---|---|
+| `bench_loop`（1e7 次整数累加循环） | 27.63 ms | 16.71 ms | **1.65x** | 一致 |
+| `bench_fib`（递归 fib） | 340.43 ms | 11.80 ms | **28.85x** | 一致 |
+| `bench_sort`（数组排序） | 43.89 ms | 9.04 ms | **4.86x** | 一致 |
+
+读法：
+
+- **递归类收益最大**（函数调用不再走树遍历/环境查表，LLVM -O2 还能内联/展开）；
+- **紧循环收益有限**（解释器的 L5 De Bruijn 扁平帧已经把单层整数循环压到 22ms/1e6，LLVM 产物受 ZVal 装箱与运行时调用拖累）；
+- 三个用例的 stdout 与解释器逐字节一致，性能数字不是靠改语义换来的。
+
+复现：
+
+```bash
+python bench/llvmbackend/bench.py 3
+# 结果 JSON：bench/llvmbackend/_out/bench_result.json
+```

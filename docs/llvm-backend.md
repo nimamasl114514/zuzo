@@ -190,7 +190,7 @@ cd projects/mini_scheme && ../../zuzo.exe 主程序.hy          # 31/31
 
 ## 十、已知限制
 
-1. **平台**：模块 triple 固定 `x86_64-pc-windows-msvc`；跨平台需要改 triple 并替换运行时编译参数。
+1. **跨平台**：模块 triple 按宿主平台推导（Windows x64 / Linux x64・arm64 / macOS arm64・x64），也可用 `ZUZO_TARGET` 覆盖；`--emit-llvm` 支持任意目标（实测 `x86_64-unknown-linux-gnu` 的 IR 可被 `clang --target=... -c` 编成 ELF obj），`--emit-exe` 在跨平台时明确拒绝（本机缺目标 CRT/链接器）。
 2. **运行时是 C**：语言语义的增改要同步改 `zuzo_rt.c`（值模型/内置库/GC/错误捕获）。
 3. **依赖 clang**：`--emit-exe` 需要本机 LLVM；只想要 IR 的话 `--emit-llvm` 不依赖 clang。
 4. **优化等级**：当前固定 `-O2`（IR 与运行时同等级），未做 PGO/LTO。

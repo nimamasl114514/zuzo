@@ -1,6 +1,6 @@
-"""C 后端性能基线：解释器（SAP）vs C 产物。
+"""LLVM 后端性能基线：解释器（SAP）vs LLVM 产物。
 
-用法：python bench/cbackend/bench.py [轮数]
+用法：python bench/llvmbackend/bench.py [轮数]
 输出：每个用例的中位数耗时与加速比（JSON + 表格）。
 """
 import json
@@ -12,7 +12,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ZUZO = os.path.join(ROOT, "zuzo.exe")
-OUT = os.path.join(ROOT, "bench", "cbackend", "_out")
+OUT = os.path.join(ROOT, "bench", "llvmbackend", "_out")
 CASES = ["bench_loop", "bench_fib", "bench_sort"]
 
 
@@ -34,7 +34,7 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     results = []
     for case in CASES:
-        src = os.path.join(ROOT, "bench", "cbackend", case + ".hy")
+        src = os.path.join(ROOT, "bench", "llvmbackend", case + ".hy")
         exe = os.path.join(OUT, case + ".exe")
         build = subprocess.run([ZUZO, "--emit-exe", src, "-o", exe],
                                cwd=ROOT, capture_output=True, timeout=300)
@@ -65,7 +65,7 @@ def main():
             "speedup": round(mi / mc, 2) if mc > 0 else None,
             "same_output": same,
         })
-        print(f"{case:12s} 解释器 {mi:9.2f} ms · C {mc:8.2f} ms · 加速 {mi/mc:6.2f}x · 输出{'一致' if same else '不一致'}")
+        print(f"{case:12s} 解释器 {mi:9.2f} ms · LLVM {mc:8.2f} ms · 加速 {mi/mc:6.2f}x · 输出{'一致' if same else '不一致'}")
 
     path = os.path.join(OUT, "bench_result.json")
     with open(path, "w", encoding="utf-8") as f:
