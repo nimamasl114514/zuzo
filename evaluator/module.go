@@ -43,6 +43,10 @@ import (
 
 // ModuleManager 模块管理器：处理文件导入、路径解析、循环检测
 type ModuleManager struct {
+	// importerEnv 当前导入方的环境：被导入模块的执行环境以外层链挂到这里，
+	// 使「A 导入 B、B 导入 C」时 B 的函数能引用到 C 的顶层函数。
+	// （问题现象：跨文件函数互相调用时报 E201 未定义标识符）
+	importerEnv *object.Environment
 	baseDir     string                   // 基准目录（用于解析相对路径）
 	projectRoot string                   // 项目根目录（包含 zpm.toml 的目录，用于搜索 zpm_modules/）
 	loading     map[string]bool          // 正在加载的文件（循环检测）
@@ -414,7 +418,14 @@ func (m *ModuleManager) loadHyFile(absPath string, importPath string) (object.Ob
 	}
 
 	// 创建模块环境（带内置函数，使模块文件能使用 打印/读文件 等）
-	modEnv := NewEnvironment()
+	// 关键：以外层链挂到导入方环境——否则模块里的函数只能看见本文件，
+	// 调用其它已导入文件的函数会报 E201（第29轮实测）。
+	var modEnv *object.Environment
+	if m.importerEnv != nil {
+		modEnv = object.NewEnclosedEnvironment(m.importerEnv)
+	} else {
+		modEnv = NewEnvironment()
+	}
 
 	// 在模块环境中执行
 	result := Eval(program, modEnv)
@@ -445,7 +456,11 @@ func evalImportStatement(node *ast.ImportStatement, env *object.Environment) obj
 		return newErrorWithNode(node, diagnostic.ErrModuleNotInit.Code, "模块系统未初始化，无法导入文件")
 	}
 
+	// 记录导入方环境，供被导入模块作为外层作用域（跨文件函数互引用）
+	oldImporter := moduleManager.importerEnv
+	moduleManager.importerEnv = env
 	mod, errObj := moduleManager.LoadModule(node.Path)
+	moduleManager.importerEnv = oldImporter
 	if errObj != nil {
 		// 为 LoadModule 返回的错误补充位置信息
 		errObj.Line = getNodeLine(node)

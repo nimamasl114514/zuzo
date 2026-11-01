@@ -40,11 +40,15 @@ func TestDiagBasicParseError(t *testing.T) {
 	if !strings.Contains(rendered, "根因") {
 		t.Errorf("渲染结果应包含 '根因', 得到:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "E001") {
-		t.Errorf("渲染结果应包含错误码 'E001', 得到:\n%s", rendered)
+	// 第29轮：调用括号未闭合改报更精确的 E011（不再是泛化的 E001）
+	if !strings.Contains(rendered, "E011") {
+		t.Errorf("渲染结果应包含错误码 'E011', 得到:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "右括号") {
 		t.Errorf("渲染结果应包含 '右括号' 建议, 得到:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "未闭合") {
+		t.Errorf("渲染结果应指出「未闭合」, 得到:\n%s", rendered)
 	}
 }
 

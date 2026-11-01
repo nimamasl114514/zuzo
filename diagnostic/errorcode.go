@@ -60,6 +60,36 @@ var (
 		Title:       "非预期的词法单元",
 		Description: "该位置出现了不应出现的标记，通常由上一个语句未正确结束或缺少表达式引起。",
 	}
+	ErrUnclosedBrace = ErrorCode{
+		Code:        "E010",
+		Title:       "代码块未闭合",
+		Description: "代码块缺少右花括号 '}'，解析器已到达文件末尾。",
+	}
+	ErrUnclosedParen = ErrorCode{
+		Code:        "E011",
+		Title:       "括号未闭合",
+		Description: "分组表达式或函数调用缺少右括号 ')'。",
+	}
+	ErrUnclosedBracket = ErrorCode{
+		Code:        "E012",
+		Title:       "方括号未闭合",
+		Description: "数组字面量或索引表达式缺少右方括号 ']'。",
+	}
+	ErrBreakOutsideLoop = ErrorCode{
+		Code:        "E014",
+		Title:       "循环控制语句位置非法",
+		Description: "'跳出'/'跳过' 只能出现在 当/对于 循环体内。",
+	}
+	ErrShadowBuiltin = ErrorCode{
+		Code:        "E015",
+		Title:       "与内置函数同名",
+		Description: "用户定义的函数/变量覆盖了内置函数名；解释器可用，但 C 后端会优先用内置，行为可能不一致。",
+	}
+	ErrDuplicateParam = ErrorCode{
+		Code:        "E013",
+		Title:       "重复的形参",
+		Description: "函数形参列表中出现同名参数，后一个会覆盖前一个。",
+	}
 )
 
 // 类型错误码 (E100-E199)

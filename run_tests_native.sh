@@ -2,6 +2,8 @@
 # zuzo C 后端 · 内嵌 nativecc 对拍（--cc=native 强制，不回退）
 cd "$(dirname "$0")" || exit 1
 mkdir -p tests_c/_nat
+# 运行期警告（越界/缺键）不是程序输出：对拍时关闭，避免与 C 产物 stderr 差异误判
+export ZUZO_RT_WARN=0
 pass=0; fail=0; failed=""
 
 strip_diag() {

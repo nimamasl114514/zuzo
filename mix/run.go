@@ -14,6 +14,9 @@ import (
 	pyrt "zuzo/py/runtime"
 )
 
+// currentFile 当前混合源文件名（供各块诊断沿用，行号为原文件绝对行号）
+var currentFile string
+
 // RunFile 执行 .hypy 混合源文件，返回进程退出码
 func RunFile(path string, out, errw io.Writer) int {
 	data, err := os.ReadFile(path)
@@ -30,6 +33,7 @@ func RunFile(path string, out, errw io.Writer) int {
 //   - 块边界双向同步全局表，实现跨语言变量可见；
 //   - 任一块出错立即停止并返回非零码。
 func RunSource(src, filename string, out, errw io.Writer) int {
+	currentFile = filename
 	blocks, err := Split(src)
 	if err != nil {
 		fmt.Fprintf(errw, "%s: %v\n", filename, err)
@@ -107,7 +111,12 @@ func runZuzoBlock(b *Bridge, blk Block, errw io.Writer) int {
 	program := p.ParseProgram()
 	diag := p.Diagnostics()
 	diag.SetSource(blk.Src)
+	if currentFile != "" {
+		diag.SetFile(currentFile)
+	}
+	diag.SetStage("词法/语法")
 	if diag.HasErrors() {
+		diag.Dedupe()
 		fmt.Fprint(errw, diag.Render())
 		return 1
 	}

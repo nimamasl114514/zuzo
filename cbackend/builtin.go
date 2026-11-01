@@ -12,7 +12,7 @@ import (
 func (g *Gen) genBuiltinCall(name string, n *ast.CallExpression) (string, bool, error) {
 	args := n.Arguments
 	if len(n.NamedArgs) > 0 {
-		return "", true, fmt.Errorf("%s(): 具名参数暂不支持（计划第22轮）", name)
+		return "", true, fmt.Errorf("%d:%d: %s() 的具名参数在 C 后端暂不支持，请改用位置参数", n.Token.Line, n.Token.Column, name)
 	}
 
 	// 求值全部参数（保持从左到右副作用顺序）
@@ -391,9 +391,9 @@ var unsupportedBuiltins = map[string]string{
 }
 
 // checkUnsupported 若调用了 C 后端明确不支持的运行时，给出可读错误
-func (g *Gen) checkUnsupported(name string) error {
+func (g *Gen) checkUnsupported(name string, line, col int) error {
 	if reason, ok := unsupportedBuiltins[name]; ok {
-		return fmt.Errorf("%s() 依赖%s，C 后端不支持（请用解释器执行，或改用替代实现）", name, reason)
+		return fmt.Errorf("%d:%d: %s() 依赖%s，C 后端不支持（请用解释器执行，或改用替代实现）", line, col, name, reason)
 	}
 	return nil
 }

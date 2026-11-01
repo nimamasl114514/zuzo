@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,11 +14,7 @@ import (
 // cc: "native"（内嵌自研编译器）| "gcc"（外部 gcc/clang）| "auto"（native 优先，失败回退 gcc）
 func parseEmitArgs(args []string) (src, out, cc string, err error) {
 	cc = "auto"
-	if len(args) < 1 {
-		return "", "", "", fmt.Errorf("缺少源文件参数")
-	}
-	src = args[0]
-	for i := 1; i < len(args); i++ {
+	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
 		case arg == "-o" || arg == "--out":
@@ -31,11 +28,44 @@ func parseEmitArgs(args []string) (src, out, cc string, err error) {
 			if cc != "native" && cc != "gcc" && cc != "auto" {
 				return "", "", "", fmt.Errorf("未知编译器模式: %s（可选 native / gcc / auto）", cc)
 			}
-		default:
+		case strings.HasPrefix(arg, "-"):
 			return "", "", "", fmt.Errorf("未知参数: %s", arg)
+		default:
+			if src == "" {
+				src = arg
+			} else {
+				return "", "", "", fmt.Errorf("多余的参数: %s（只接受一个源文件）", arg)
+			}
 		}
 	}
+	if src == "" {
+		return "", "", "", fmt.Errorf("缺少源文件参数")
+	}
 	return src, out, cc, nil
+}
+
+// printBackendErr 统一输出后端错误：
+// 诊断类错误（语法/类型）已自带完整排版，直接输出；其他后端错误加前缀并附中间产物。
+func printBackendErr(err error, src, cPath string) {
+	var de *cbackend.DiagError
+	if errors.As(err, &de) {
+		fmt.Fprint(os.Stderr, de.Text)
+		if !strings.HasSuffix(de.Text, "\n") {
+			fmt.Fprintln(os.Stderr)
+		}
+		return
+	}
+	msg := err.Error()
+	// 后端错误消息以「行:列:」开头时，补上源文件名，与前端诊断的 file:line:col 口径一致
+	if src != "" && len(msg) > 2 && msg[0] >= '0' && msg[0] <= '9' {
+		if i := strings.Index(msg, ": "); i > 0 && strings.Count(msg[:i], ":") == 1 {
+			msg = src + ":" + msg
+		}
+	}
+	fmt.Fprintf(os.Stderr, "C 后端错误: %s\n", msg)
+	if cPath != "" {
+		fmt.Fprintf(os.Stderr, "（中间 C 源码: %s）\n", cPath)
+	}
 }
 
 func emitCCommand(args []string) {
@@ -50,7 +80,7 @@ func emitCCommand(args []string) {
 	}
 	absOut, _ := filepath.Abs(out)
 	if _, err := cbackend.WriteC(src, absOut); err != nil {
-		fmt.Fprintf(os.Stderr, "C 后端错误: %v\n", err)
+		printBackendErr(err, src, "")
 		os.Exit(1)
 	}
 	fmt.Printf("已生成 C 源码: %s\n", absOut)
@@ -86,10 +116,7 @@ func emitExeCommand(args []string) {
 		}
 	}
 	if buildErr != nil {
-		fmt.Fprintf(os.Stderr, "C 后端错误: %v\n", buildErr)
-		if cPath != "" {
-			fmt.Fprintf(os.Stderr, "（中间 C 源码: %s）\n", cPath)
-		}
+		printBackendErr(buildErr, src, cPath)
 		os.Exit(1)
 	}
 	fmt.Printf("已生成可执行文件: %s\n", exePath)

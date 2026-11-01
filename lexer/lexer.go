@@ -1,10 +1,20 @@
 package lexer
 
 import (
+	"fmt"
 	"unicode"
 
 	"zuzo/token"
 )
+
+// Error 一个词法层错误（未闭合字符串等），由解析器统一并入诊断报告
+//
+type Error struct {
+	Code    string // 错误码，如 E007
+	Message string
+	Line    int
+	Column  int
+}
 
 // Lexer 词法分析器，将源代码字符串转换为词法单元序列
 type Lexer struct {
@@ -14,6 +24,19 @@ type Lexer struct {
 	ch           rune   // 当前字符
 	line         int    // 当前行号
 	column       int    // 当前列号
+	errors       []Error // 词法错误（不中断扫描，交给解析器统一上报）
+}
+
+// Errors 返回扫描期间积累的词法错误
+func (l *Lexer) Errors() []Error { return l.errors }
+
+// AddError 记录一个词法错误（导出：供解析器/测试注入）
+func (l *Lexer) AddError(code, msg string, line, col int) {
+	l.errors = append(l.errors, Error{Code: code, Message: msg, Line: line, Column: col})
+}
+
+func (l *Lexer) addError(code, msg string, line, col int) {
+	l.AddError(code, msg, line, col)
 }
 
 // New 创建一个新的词法分析器
@@ -79,6 +102,9 @@ func (l *Lexer) skipWhitespace() {
 
 // NextToken 返回下一个词法单元
 func (l *Lexer) NextToken() token.Token {
+	// 记录 token 起始位置：标识符/数字/字符串在读取过程中会推进 line/column，
+	// 若用读取完的位置，诊断定位会漂到 token 末尾（甚至跨行）。
+	startLine, startCol := l.line, l.column
 	var tok token.Token
 
 	l.skipWhitespace()
@@ -154,10 +180,11 @@ func (l *Lexer) NextToken() token.Token {
 	case ':':
 		tok = newToken(token.COLON, l.ch, l.line, l.column)
 	case '"':
+		// 位置取「开引号」处，而不是读完之后的位置（否则所有字符串的词法位置都会漂到结尾）
 		tok.Type = token.STRING
-		tok.Literal = l.readString()
-		tok.Line = l.line
-		tok.Column = l.column
+		tok.Literal = l.readString(startLine, startCol)
+		tok.Line = startLine
+		tok.Column = startCol
 	case 0:
 		tok.Type = token.EOF
 		tok.Literal = ""
@@ -167,13 +194,13 @@ func (l *Lexer) NextToken() token.Token {
 			// f-字符串前缀检测: f"..." 或 F"..."（Python 风格插值）
 			if (ident == "f" || ident == "F") && l.ch == '"' {
 				tok.Type = token.FSTRING
-				tok.Literal = l.readFString()
-				tok.Line = l.line
-				tok.Column = l.column
+				tok.Literal = l.readFString(startLine, startCol)
+				tok.Line = startLine
+				tok.Column = startCol
 				break
 			}
 			tokType := token.LookupIdent(ident)
-			return token.Token{Type: tokType, Literal: ident, Line: l.line, Column: l.column}
+			return token.Token{Type: tokType, Literal: ident, Line: startLine, Column: startCol}
 		} else if isDigitFast(l.ch) {
 			numStr, isFloat := l.readNumber()
 			var tt token.TokenType
@@ -182,11 +209,11 @@ func (l *Lexer) NextToken() token.Token {
 			} else {
 				tt = token.INT
 			}
-			return token.Token{Type: tt, Literal: numStr, Line: l.line, Column: l.column}
+			return token.Token{Type: tt, Literal: numStr, Line: startLine, Column: startCol}
 		} else if l.ch == '.' && isDigitFast(l.peekChar()) {
 			// 支持以小数点开头的浮点数: .5, .0
 			numStr, _ := l.readNumber()
-			return token.Token{Type: token.FLOAT, Literal: numStr, Line: l.line, Column: l.column}
+			return token.Token{Type: token.FLOAT, Literal: numStr, Line: startLine, Column: startCol}
 		} else if l.ch == '.' {
 			// 点号成员访问运算符: 模块.成员
 			tok = newToken(token.DOT, l.ch, l.line, l.column)
@@ -279,7 +306,7 @@ func (l *Lexer) readNumber() (string, bool) {
 	return string(l.input[start:l.position]), isFloat
 }
 
-func (l *Lexer) readString() string {
+func (l *Lexer) readString(startLine, startCol int) string {
 	var buf []rune
 	l.readChar() // 跳过开头的引号
 	for l.ch != '"' && l.ch != 0 {
@@ -304,13 +331,18 @@ func (l *Lexer) readString() string {
 		}
 		l.readChar()
 	}
+	if l.ch == 0 {
+		l.addError("E007",
+			fmt.Sprintf("字符串未闭合：起始于 %d:%d 的引号直到文件末尾都没有闭合", startLine, startCol),
+			startLine, startCol)
+	}
 	return string(buf)
 }
 
 // readFString 读取 f-字符串内容（Python 风格插值）
 // 与 readString 的关键区别：在 {} 内部时，" 不会关闭字符串
 // 跟踪 {} 深度 + 嵌套字符串状态，确保 f"{大写("hello")}" 正确读取
-func (l *Lexer) readFString() string {
+func (l *Lexer) readFString(startLine, startCol int) string {
 	var buf []rune
 	l.readChar()         // 跳过开头的引号
 	depth := 0           // {} 深度
@@ -406,6 +438,17 @@ func (l *Lexer) readFString() string {
 		// 单个 } 在文本部分直接保留（{{ 和 }} 的处理交给 parser）
 		buf = append(buf, l.ch)
 		l.readChar()
+	}
+	if l.ch == 0 {
+		if depth > 0 {
+			l.addError("E007",
+				fmt.Sprintf("f-字符串未闭合：起始于 %d:%d，且插值表达式内的花括号未闭合", startLine, startCol),
+				startLine, startCol)
+		} else {
+			l.addError("E007",
+				fmt.Sprintf("f-字符串未闭合：起始于 %d:%d 的引号直到文件末尾都没有闭合", startLine, startCol),
+				startLine, startCol)
+		}
 	}
 	return string(buf)
 }

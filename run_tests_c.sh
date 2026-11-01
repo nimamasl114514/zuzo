@@ -6,6 +6,8 @@
 # 退出码：0 = 全过；非 0 = 有用例失败
 cd "$(dirname "$0")" || exit 1
 mkdir -p tests_c/_out
+# 运行期警告（越界/缺键）不是程序输出：对拍时关闭，避免与 C 产物 stderr 差异误判
+export ZUZO_RT_WARN=0
 pass=0; fail=0; failed=""
 
 strip_diag() {

@@ -63,3 +63,6 @@ bench/mix/_sync_*
 
 # fuzz 过程产物（每次运行重新生成；报告与失败样例保留）
 fuzz/reports/work/
+
+# lxread 索引缓存（第29轮）
+.lxread/

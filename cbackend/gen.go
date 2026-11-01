@@ -17,6 +17,8 @@ import (
 type Options struct {
 	SourcePath string
 	KeepTemp   bool
+	// Strict 严格模式：越界/缺键在运行期直接报错（与解释器 --strict 一致）
+	Strict bool
 }
 
 // varKind 变量在 C 侧的存储形态
@@ -24,6 +26,7 @@ type varKind int
 
 const (
 	vPlain   varKind = iota // ZVal
+	vGlobal                 // 顶层变量 → 文件作用域静态变量（zg_<name>）
 	vBox                    // ZBox*（被内层闭包捕获）
 	vCapture                // 通过 env 结构体间接访问的 ZBox*
 )
@@ -49,6 +52,10 @@ type Gen struct {
 	updateLabels []string
 	defines  map[string]*ast.DefineStatement
 	defOrder []string
+	// globals 顶层变量集合：函数体内引用顶层变量时走文件作用域静态量，
+	// 否则会报「未定义的变量」（第29轮实测：C 后端不支持函数读顶层变量）
+	globals     map[string]bool
+	globalOrder []string
 }
 
 // Generate 把 zuzo 程序翻译成一份完整可编译的 C 源码。
@@ -59,8 +66,10 @@ func Generate(program *ast.Program, opt Options) (code string, err error) {
 		}
 	}()
 
-	g := &Gen{funcs: map[string]*fnInfo{}, opt: opt, defines: map[string]*ast.DefineStatement{}}
+	g := &Gen{funcs: map[string]*fnInfo{}, opt: opt, defines: map[string]*ast.DefineStatement{},
+		globals: map[string]bool{}}
 	g.ana = analyzeProgram(program)
+	g.collectGlobals(program)
 	for _, stmt := range program.Statements {
 		if d, ok := stmt.(*ast.DefineStatement); ok {
 			if _, dup := g.defines[d.Name]; !dup {
@@ -89,6 +98,14 @@ func Generate(program *ast.Program, opt Options) (code string, err error) {
 	g.line("")
 	g.line("#include <stdint.h>")
 	g.line("")
+
+	// 0) 顶层变量 → 文件作用域静态量
+	for _, name := range g.globalOrder {
+		g.line("static ZVal %s;", cGlobalName(name))
+	}
+	if len(g.globalOrder) > 0 {
+		g.line("")
+	}
 
 	// 1) 前向声明
 	for _, name := range g.defOrder {
@@ -140,6 +157,9 @@ func Generate(program *ast.Program, opt Options) (code string, err error) {
 	g.line("int main(int argc, char** argv) {")
 	g.line("    (void)argc; (void)argv;")
 	g.line("    z_rt_init();")
+	if g.opt.Strict {
+		g.line("    z_set_strict(1);")
+	}
 	g.pushScope()
 	g.cur = nil
 	for _, stmt := range program.Statements {
@@ -178,6 +198,93 @@ func cFuncName(name string) string {
 }
 
 func cVarName(name string) string { return "zv_" + sanitizeIdent(name) }
+
+// cGlobalName 顶层变量在 C 里的名字（函数与 main 共享）
+func cGlobalName(name string) string { return "zg_" + sanitizeIdent(name) }
+
+// collectGlobals 收集顶层（不在任何函数体内）声明的变量名。
+// 口径与解释器一致：顶层语句共享同一个全局环境，块里的变量也落在全局。
+func (g *Gen) collectGlobals(program *ast.Program) {
+	var walkStmt func(ast.Statement)
+	var walkExpr func(ast.Expression)
+	add := func(name string) {
+		if name == "" || g.globals[name] {
+			return
+		}
+		g.globals[name] = true
+		g.globalOrder = append(g.globalOrder, name)
+	}
+	walkStmt = func(st ast.Statement) {
+		switch n := st.(type) {
+		case *ast.LetStatement:
+			if n.Name != nil {
+				add(n.Name.Value)
+			}
+			walkExpr(n.Value)
+		case *ast.ExpressionStatement:
+			walkExpr(n.Expression)
+		case *ast.ReturnStatement:
+			walkExpr(n.ReturnValue)
+		case *ast.BlockStatement:
+			for _, s := range n.Statements {
+				walkStmt(s)
+			}
+		case *ast.WhileStatement:
+			walkExpr(n.Condition)
+			if n.Body != nil {
+				walkStmt(n.Body)
+			}
+		case *ast.ForStatement:
+			walkExpr(n.Init)
+			walkExpr(n.Condition)
+			walkExpr(n.Update)
+			if n.Body != nil {
+				walkStmt(n.Body)
+			}
+		case *ast.ForInStatement:
+			walkExpr(n.Iterable)
+			walkExpr(n.EndExpr)
+			walkExpr(n.Guard)
+			if n.Body != nil {
+				walkStmt(n.Body)
+			}
+		}
+	}
+	walkExpr = func(e ast.Expression) {
+		switch n := e.(type) {
+		case *ast.IfExpression:
+			walkExpr(n.Condition)
+			if n.Consequence != nil {
+				walkStmt(n.Consequence)
+			}
+			if n.Alternative != nil {
+				walkStmt(n.Alternative)
+			}
+		case *ast.InfixExpression:
+			walkExpr(n.Left)
+			walkExpr(n.Right)
+		case *ast.PrefixExpression:
+			walkExpr(n.Right)
+		case *ast.AssignExpression:
+			walkExpr(n.Value)
+		case *ast.CallExpression:
+			walkExpr(n.Function)
+			for _, a := range n.Arguments {
+				walkExpr(a)
+			}
+		case *ast.ArrayLiteral:
+			for _, el := range n.Elements {
+				walkExpr(el)
+			}
+		case *ast.IndexExpression:
+			walkExpr(n.Left)
+			walkExpr(n.Index)
+		}
+	}
+	for _, st := range program.Statements {
+		walkStmt(st)
+	}
+}
 
 func envFieldName(name string) string { return "v_" + sanitizeIdent(name) }
 
@@ -317,6 +424,14 @@ func (g *Gen) gcRoots() string {
 			}
 		}
 	}
+	// 顶层变量也是 GC 根：否则 GC 可能回收只有全局引用指向的对象
+	for _, n := range g.globalOrder {
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		vals = append(vals, "&"+cGlobalName(n))
+	}
 	nvals, vlist := "0", "NULL"
 	if len(vals) > 0 {
 		nvals = fmt.Sprintf("%d", len(vals))
@@ -349,6 +464,15 @@ func (g *Gen) temp() string {
 }
 
 func (g *Gen) unsupported(what string) { g.errs = append(g.errs, what) }
+
+// unsupportedAt 记录一条带位置的「C 后端不支持」错误（位置让用户能直接跳转）
+func (g *Gen) unsupportedAt(line, col int, what string) {
+	if line > 0 {
+		g.errs = append(g.errs, fmt.Sprintf("%d:%d: %s", line, col, what))
+		return
+	}
+	g.errs = append(g.errs, what)
+}
 
 // boxedBy 判断某变量是否被当前函数的子闭包捕获（需要在声明处装箱）
 func (g *Gen) boxedBy(fi *fnInfo, name string) bool {

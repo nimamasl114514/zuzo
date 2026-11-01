@@ -19,6 +19,11 @@
 
 /* 解释器（Go）输出 LF；C 运行时在 Windows 默认文本模式会把 \n 转成 \r\n。
  * 统一为二进制模式，保证逐字节对拍一致。 */
+/* 严格模式开关：默认与解释器一致（越界/缺键返回 空）；
+   编译时加 --strict 会调用 z_set_strict(1)，改为直接报错中止。 */
+int z_strict_mode = 0;
+void z_set_strict(int v) { z_strict_mode = v; }
+
 void z_rt_init(void) {
     z_gc_init();
 #ifdef _WIN32
@@ -700,7 +705,10 @@ void z_hash_set(ZVal hv, ZVal k, ZVal v) {
 ZVal z_hash_get(ZVal hv, ZVal k) {
     ZHash* h = hv.as.h;
     int64_t i = z_hash_find(h, k);
-    if (i < 0) return z_null();
+    if (i < 0) {
+        if (z_strict_mode) z_die("E209", "哈希键不存在");
+        return z_null();
+    }
     return h->entries[i].val;
 }
 
@@ -708,11 +716,51 @@ ZVal z_hash_get(ZVal hv, ZVal k) {
  * 下标
  * ══════════════════════════════════════════════════════════ */
 
+/* 按 UTF-8 码点下标取单个字符（负下标从尾部计），返回新字符串 */
+static ZVal z_str_char_at(ZVal obj, int64_t target) {
+    const char* s = obj.as.s->data;
+    int64_t bytes = obj.as.s->len;
+    int64_t n = z_utf8_len(s, bytes);
+    if (target < 0) target += n;
+    if (target < 0 || target >= n) {
+        if (z_strict_mode) z_die("E207", "字符串下标越界");
+        return z_null();
+    }
+    int64_t rune = 0, i = 0;
+    while (i < bytes && rune < target) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) i += 1;
+        else if ((c >> 5) == 0x06) i += 2;
+        else if ((c >> 4) == 0x0E) i += 3;
+        else if ((c >> 3) == 0x1E) i += 4;
+        else i += 1;
+        rune++;
+    }
+    unsigned char c = (unsigned char)s[i];
+    int64_t len = 1;
+    if (c >= 0x80) {
+        if ((c >> 5) == 0x06) len = 2;
+        else if ((c >> 4) == 0x0E) len = 3;
+        else if ((c >> 3) == 0x1E) len = 4;
+    }
+    char* buf = (char*)z_alloc((size_t)len + 1);
+    memcpy(buf, s + i, (size_t)len);
+    buf[len] = '\0';
+    return z_str_take(buf, len);
+}
+
 ZVal z_index_get(ZVal obj, ZVal idx) {
     if (obj.kind == ZK_ARRAY && idx.kind == ZK_INT) {
-        if (idx.as.i < 0 || idx.as.i >= obj.as.a->len) return z_null();
-        return obj.as.a->items[idx.as.i];
+        /* 负下标从尾部计（与解释器一致） */
+        int64_t i = idx.as.i;
+        if (i < 0) i += obj.as.a->len;
+        if (i < 0 || i >= obj.as.a->len) {
+            if (z_strict_mode) z_die("E207", "数组下标越界");
+            return z_null();
+        }
+        return obj.as.a->items[i];
     }
+    if (obj.kind == ZK_STR && idx.kind == ZK_INT) return z_str_char_at(obj, idx.as.i);
     if (obj.kind == ZK_HASH) return z_hash_get(obj, idx);
     z_die("E205", "不支持对该类型使用索引操作");
     return z_null();

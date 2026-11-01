@@ -148,6 +148,9 @@ func (g *Gen) genIdent(name string) (string, error) {
 			return "zenv->" + envFieldName(name) + "->v", nil
 		}
 	}
+	if g.globals[name] {
+		return cGlobalName(name), nil
+	}
 	if fi, ok := g.funcs[name]; ok {
 		return g.genClosureRef(fi)
 	}
@@ -319,14 +322,14 @@ func (g *Gen) genCall(n *ast.CallExpression) (string, error) {
 	}
 	ident, isIdent := n.Function.(*ast.Identifier)
 	if isIdent {
-		if err := g.checkUnsupported(ident.Value); err != nil {
+		if err := g.checkUnsupported(ident.Value, n.Token.Line, n.Token.Column); err != nil {
 			return "", err
 		}
 		if args, ok, err := g.genBuiltinCall(ident.Value, n); ok {
 			return args, err
 		}
-		// 变量里存的是函数 → 走 z_call
-		if slot, ok := g.lookupVar(ident.Value); ok {
+		// 变量里存的是函数 → 走 z_call（含顶层变量：c() 里 c 是全局闭包）
+		if slot, ok := g.lookupVar(ident.Value); ok || g.globals[ident.Value] {
 			fnRef := ident.Value
 			_ = slot
 			f, err := g.genIdent(fnRef)
@@ -412,6 +415,11 @@ func (g *Gen) genAssignExpr(n *ast.AssignExpression) (string, error) {
 				g.line("zenv->%s->v = %s;", envFieldName(n.Name.Value), val)
 				return "zenv->" + envFieldName(n.Name.Value) + "->v", nil
 			}
+		}
+		// 顶层变量：直接写静态量
+		if g.globals[n.Name.Value] {
+			g.line("%s = %s;", cGlobalName(n.Name.Value), val)
+			return cGlobalName(n.Name.Value), nil
 		}
 		// 与解释器一致：赋值即定义
 		if g.boxedBy(g.cur, n.Name.Value) {

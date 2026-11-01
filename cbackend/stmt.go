@@ -54,11 +54,26 @@ func (g *Gen) genStmt(stmt ast.Statement) error {
 		return nil
 
 	case *ast.WhileStatement:
+		// 条件求值可能产生前置语句（逻辑运算的临时量）。
+		// 这些语句必须每轮重新执行，否则条件被「算一次」→ 死循环
+		// （第29轮实测：当 i < n 并且 真 { i = i + 1 } 在 C 后端永不退出）。
+		mark := g.buf.Len()
 		cond, err := g.genExpr(s.Condition)
 		if err != nil {
 			return err
 		}
-		g.line("while (z_truthy(%s)) {", cond)
+		prelude := g.buf.String()[mark:]
+		if prelude != "" {
+			g.buf.Truncate(mark)
+		}
+		if prelude == "" {
+			g.line("while (z_truthy(%s)) {", cond)
+		} else {
+			g.line("while (1) {")
+			g.pushScope()
+			g.buf.WriteString(prelude)
+			g.line("if (!z_truthy(%s)) break;", cond)
+		}
 		g.pushScope()
 		g.updateLabels = append(g.updateLabels, "")
 		for _, inner := range s.Body.Statements {
@@ -68,6 +83,9 @@ func (g *Gen) genStmt(stmt ast.Statement) error {
 		}
 		g.updateLabels = g.updateLabels[:len(g.updateLabels)-1]
 		g.popScope()
+		if prelude != "" {
+			g.popScope()
+		}
 		g.line("}")
 		return nil
 
@@ -91,7 +109,7 @@ func (g *Gen) genStmt(stmt ast.Statement) error {
 		return nil
 
 	case *ast.ImportStatement:
-		g.unsupported(fmt.Sprintf("导入语句（%s）：计划第25轮", s.Path))
+		g.unsupportedAt(s.Token.Line, s.Token.Column, fmt.Sprintf("导入语句（%s）在 C 后端不支持，请把被导入内容的语句直接写在主文件里", s.Path))
 		return nil
 
 	case *ast.DefineStatement:
@@ -159,6 +177,11 @@ func (g *Gen) genLet(s *ast.LetStatement) error {
 		}
 		return nil
 	}
+	// 顶层变量：写文件作用域静态量，函数体内可直接引用
+	if g.globals[name] {
+		g.line("%s = %s;", cGlobalName(name), val)
+		return nil
+	}
 	// 被内层闭包捕获的变量需要装箱（堆上共享）
 	if g.boxedBy(g.cur, name) {
 		g.setVar(name, varSlot{kind: vBox})
@@ -216,17 +239,18 @@ func (g *Gen) genFor(s *ast.ForStatement) error {
 			return err
 		}
 	}
-	cond := "z_bool(1)"
+	// 用 while(1) + 显式 update 标签：continue 跳标签，保证 update 不被跳过
+	g.line("while (1) {")
+	g.pushScope()
+	// 条件在循环体内生成：条件表达式可能带前置语句（逻辑运算的临时量），
+	// 放到循环外会被只算一次 → 死循环（与 while 同类 bug，第29轮一并修）
 	if s.Condition != nil {
 		c, err := g.genExpr(s.Condition)
 		if err != nil {
 			return err
 		}
-		cond = c
+		g.line("    if (!z_truthy(%s)) { break; }", c)
 	}
-	// 用 while(1) + 显式 update 标签：continue 跳标签，保证 update 不被跳过
-	g.line("while (1) {")
-	g.line("    if (!z_truthy(%s)) { break; }", cond)
 	g.pushScope()
 	g.labelSeq++
 	label := fmt.Sprintf("zupd_%d", g.labelSeq)

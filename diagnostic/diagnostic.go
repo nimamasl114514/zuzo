@@ -119,6 +119,10 @@ type Report struct {
 	rootByLine map[int]*Atom
 	// 源码行缓存（按行号索引，用于显示源码上下文）
 	sourceLines map[int]string
+	// 源文件名（用于诊断头部与 file:line:col 机器可读定位）
+	file string
+	// 阶段标签（词法/语法/类型/运行期/C后端），用于多报告合并时区分来源
+	stage string
 }
 
 // New 创建空诊断报告
@@ -127,6 +131,100 @@ func New() *Report {
 		rootByLine:  make(map[int]*Atom),
 		sourceLines: make(map[int]string),
 	}
+}
+
+// SetFile 设置源文件名（诊断头与定位行都会带上）
+func (r *Report) SetFile(name string) {
+	r.file = name
+}
+
+// File 返回源文件名
+func (r *Report) File() string {
+	return r.file
+}
+
+// SetStage 设置阶段标签（如「语法」「类型」「运行期」）
+func (r *Report) SetStage(stage string) {
+	r.stage = stage
+}
+
+// Stage 返回阶段标签
+func (r *Report) Stage() string {
+	return r.stage
+}
+
+// MergeFrom 把另一份报告并入本报告（跨阶段合并，避免另起一块输出）
+// 合并时按 (Code, Line, Column, Message) 去重，保持先到先得。
+func (r *Report) MergeFrom(other *Report) int {
+	if other == nil {
+		return 0
+	}
+	added := 0
+	for _, a := range other.atoms {
+		if r.HasSame(a) {
+			continue
+		}
+		r.atoms = append(r.atoms, a)
+		if a.Cause == nil && r.rootByLine[a.Line] == nil {
+			r.rootByLine[a.Line] = a
+		}
+		added++
+	}
+	for line, src := range other.sourceLines {
+		if _, ok := r.sourceLines[line]; !ok {
+			r.sourceLines[line] = src
+		}
+	}
+	if r.file == "" {
+		r.file = other.file
+	}
+	return added
+}
+
+// HasSame 判断是否已存在同码同位置同消息的活字
+func (r *Report) HasSame(a *Atom) bool {
+	for _, ex := range r.atoms {
+		if ex.Code == a.Code && ex.Line == a.Line && ex.Column == a.Column && ex.Message == a.Message {
+			return true
+		}
+	}
+	return false
+}
+
+// Dedupe 去重（同码同位置同消息只保留第一条），返回被丢弃的数量
+func (r *Report) Dedupe() int {
+	seen := make(map[string]bool, len(r.atoms))
+	kept := r.atoms[:0]
+	dropped := 0
+	for _, a := range r.atoms {
+		key := a.Code + "|" + strconv.Itoa(a.Line) + "|" + strconv.Itoa(a.Column) + "|" + a.Message
+		if seen[key] {
+			dropped++
+			continue
+		}
+		seen[key] = true
+		kept = append(kept, a)
+	}
+	r.atoms = kept
+	return dropped
+}
+
+// SetSeverityAll 把报告内所有活字的严重级统一设为 sev
+// 用于「类型错误默认只警告不阻断」的场景：先入报告，再整体降级
+func (r *Report) SetSeverityAll(sev Severity) {
+	for _, a := range r.atoms {
+		a.Severity = sev
+	}
+}
+
+// HasErrorSeverity 是否存在 error 级别（用于决定退出码）
+func (r *Report) HasErrorSeverity() bool {
+	for _, a := range r.atoms {
+		if a.Severity == SeverityError {
+			return true
+		}
+	}
+	return false
 }
 
 // SetSource 设置待检查的源码（用于错误报告中显示源码上下文）
@@ -262,6 +360,12 @@ func (r *Report) Render() string {
 	} else if warnCount > 0 {
 		summary += fmt.Sprintf("（%d 个警告）", warnCount)
 	}
+	if r.stage != "" {
+		summary += " · " + r.stage
+	}
+	if r.file != "" {
+		summary += " · " + r.file
+	}
 	buf.WriteString("━━━ " + summary + " ━━━\n")
 
 	// 分组：按"因果链"分组
@@ -371,52 +475,101 @@ func (r *Report) renderGroup(buf *strings.Builder, group []*Atom) {
 	}
 }
 
-// renderAtom 渲染单个活字块
+// renderAtom 渲染单个活字块（rustc 风格：消息行 → --> file:line:col → 源码片段 + 箭头）
 func (r *Report) renderAtom(buf *strings.Builder, atom *Atom, depth int, isRoot bool) {
 	indent := strings.Repeat("  ", depth)
 
-	// 图标 + 级别 + 严重度 + 错误码
+	// 图标 + 级别 + 严重度 + 错误码 + 消息
 	severityIcon := atom.Severity.Icon()
 	levelStr := atom.Level.String()
-	buf.WriteString(fmt.Sprintf("%s%s %s [%s] %s\n",
+	buf.WriteString(fmt.Sprintf("%s%s %s [%s]: %s\n",
 		indent, severityIcon, levelStr, atom.Code, atom.Message))
+
+	// 机器可读定位行（文件:行:列）——统一格式，便于编辑器/CI 跳转
+	if atom.Line > 0 {
+		loc := fmt.Sprintf("%d:%d", atom.Line, atom.Column)
+		if r.file != "" {
+			loc = r.file + ":" + loc
+		}
+		// 机器可读的 file:line:col + 人读的行列描述
+		if atom.Column > 0 {
+			buf.WriteString(fmt.Sprintf("%s   --> %s（行 %d, 列 %d）\n", indent, loc, atom.Line, atom.Column))
+		} else {
+			buf.WriteString(fmt.Sprintf("%s   --> %s（行 %d）\n", indent, loc, atom.Line))
+		}
+	}
 
 	// 源码上下文（如果有源码行缓存）
 	if atom.Line > 0 {
 		if sourceLine, ok := r.sourceLines[atom.Line]; ok {
-			// 行号（右对齐到 4 位）
 			lineNum := strconv.Itoa(atom.Line)
-			buf.WriteString(fmt.Sprintf("%s  %4s │ %s\n", indent, lineNum, sourceLine))
-			// 箭头定位
-			if atom.Column > 0 && atom.Column <= len(sourceLine)+1 {
-				arrow := strings.Repeat(" ", atom.Column-1) + "^"
-				// 如果有建议，在箭头后显示
-				if atom.Suggestion != "" {
-					arrow += " " + atom.Suggestion
+			pad := strings.Repeat(" ", len(lineNum))
+			buf.WriteString(fmt.Sprintf("%s   %s |\n", indent, pad))
+			buf.WriteString(fmt.Sprintf("%s   %s | %s\n", indent, lineNum, sourceLine))
+			// 箭头定位（按显示宽度计：中文/全角字符占 2 列，否则箭头会错位）
+			if atom.Column > 0 {
+				colRunes := []rune(sourceLine)
+				if atom.Column <= len(colRunes)+1 {
+					prefix := string(colRunes[:atom.Column-1])
+					arrow := strings.Repeat(" ", displayWidth(prefix)) + "^"
+					if atom.Suggestion != "" {
+						arrow += " " + atom.Suggestion
+					}
+					buf.WriteString(fmt.Sprintf("%s   %s | %s\n", indent, pad, arrow))
+				} else if atom.Suggestion != "" {
+					buf.WriteString(fmt.Sprintf("%s   %s | %s\n", indent, pad, "^ "+atom.Suggestion))
 				}
-				buf.WriteString(fmt.Sprintf("%s       │ %s\n", indent, arrow))
 			} else if atom.Suggestion != "" {
-				buf.WriteString(fmt.Sprintf("%s       │ %s\n", indent, "  "+atom.Suggestion))
+				buf.WriteString(fmt.Sprintf("%s   %s | %s\n", indent, pad, "^ "+atom.Suggestion))
 			}
 		} else {
 			// 没有源码缓存，显示位置信息
-			pos := fmt.Sprintf("行 %d", atom.Line)
-			if atom.Column > 0 {
-				pos += fmt.Sprintf("，列 %d", atom.Column)
-			}
-			buf.WriteString(fmt.Sprintf("%s  位置: %s\n", indent, pos))
 			if atom.Suggestion != "" {
-				buf.WriteString(fmt.Sprintf("%s  建议: %s\n", indent, atom.Suggestion))
+				buf.WriteString(fmt.Sprintf("%s   建议: %s\n", indent, atom.Suggestion))
 			}
 		}
 	} else if atom.Suggestion != "" {
-		buf.WriteString(fmt.Sprintf("%s  建议: %s\n", indent, atom.Suggestion))
+		buf.WriteString(fmt.Sprintf("%s   建议: %s\n", indent, atom.Suggestion))
 	}
 
 	// 因果链提示
 	if atom.Cause != nil && !isRoot {
-		buf.WriteString(fmt.Sprintf("%s  ↑ 因: %s [%s]\n", indent, atom.Cause.Message, atom.Cause.Code))
+		buf.WriteString(fmt.Sprintf("%s   ↑ 因: %s [%s]\n", indent, atom.Cause.Message, atom.Cause.Code))
 	}
+}
+
+// displayWidth 返回字符串在等宽终端下的显示宽度（中文/全角算 2 列）。
+// 仅用于错误箭头对齐；不是完整的 East Asian Width 实现，但覆盖常见 CJK 区间。
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		if isWideRune(r) {
+			w += 2
+		} else {
+			w++
+		}
+	}
+	return w
+}
+
+func isWideRune(r rune) bool {
+	switch {
+	case r >= 0x1100 && r <= 0x115F, // 谚文字母
+		r >= 0x2E80 && r <= 0x303E, // CJK 部首/标点
+		r >= 0x3041 && r <= 0x33FF, // 假名/CJK 兼容
+		r >= 0x3400 && r <= 0x4DBF, // CJK 扩展 A
+		r >= 0x4E00 && r <= 0x9FFF, // CJK 基本区
+		r >= 0xA000 && r <= 0xA4CF, // 彝文
+		r >= 0xAC00 && r <= 0xD7A3, // 谚文音节
+		r >= 0xF900 && r <= 0xFAFF, // CJK 兼容表意
+		r >= 0xFE30 && r <= 0xFE6F, // CJK 兼容形式
+		r >= 0xFF00 && r <= 0xFF60, // 全角 ASCII
+		r >= 0xFFE0 && r <= 0xFFE6, // 全角符号
+		r >= 0x1F300 && r <= 0x1FAFF, // emoji
+		r >= 0x20000 && r <= 0x3FFFD: // CJK 扩展 B+
+		return true
+	}
+	return false
 }
 
 // ============================================================

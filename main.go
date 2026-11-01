@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"zuzo/analyze"
 	"zuzo/ast"
+	"zuzo/cbackend"
 	"zuzo/diagnostic"
 	"zuzo/encoding"
 	"zuzo/evaluator"
@@ -30,6 +32,65 @@ import (
 
 // moduleManager 全局模块管理器（在 runFile/runCode 中初始化）
 var moduleManager *evaluator.ModuleManager
+
+// pendingCompileDiag 编译期（类型检查）警告缓存：
+// 默认模式下类型错误不阻断执行，但不应立刻打印——否则运行期再报同一处时会出现两段重复报告。
+// 统一在运行结束（成功）或运行期出错时合并输出。
+var pendingCompileDiag *diagnostic.Report
+
+// compileFile 当前正在编译/执行的文件名（供运行期诊断定位）
+var compileFile string
+
+// builtinNameSet 内置函数名集合（静态检查判定「已定义」用，惰性初始化）
+var builtinNameSet map[string]bool
+
+func builtinSet() map[string]bool {
+	if builtinNameSet == nil {
+		names := evaluator.BuiltinNames()
+		builtinNameSet = make(map[string]bool, len(names))
+		for _, n := range names {
+			builtinNameSet[n] = true
+		}
+	}
+	return builtinNameSet
+}
+
+// addShadowIssues 把「与内置同名」的定义加入诊断报告（警告级），返回命中数。
+// checkBaseDir 返回当前被检查文件所在目录（用于导入路径解析）
+func checkBaseDir() string {
+	if compileFile != "" && compileFile != "<内联>" {
+		if abs, err := filepath.Abs(compileFile); err == nil {
+			return filepath.Dir(abs)
+		}
+	}
+	return "."
+}
+
+func addShadowIssues(diag *diagnostic.Report, program *ast.Program) int {
+	issues := analyze.ShadowedBuiltins(program, builtinSet())
+	for _, is := range issues {
+		diag.AddRootWithSeverity(diagnostic.SeverityWarning, is.Code, is.Line, is.Column, is.Message,
+			"换一个名字，或确认两条链行为一致")
+	}
+	return len(issues)
+}
+
+// addUndefinedIssues 把「全文件未定义标识符」加入诊断报告，返回命中数。
+// 这类问题在运行期必然报 E201，静态提前给出可以让用户少跑一次。
+func addUndefinedIssues(diag *diagnostic.Report, program *ast.Program, sev diagnostic.Severity) int {
+	baseDir := "."
+	if compileFile != "" && compileFile != "<内联>" {
+		if abs, err := filepath.Abs(compileFile); err == nil {
+			baseDir = filepath.Dir(abs)
+		}
+	}
+	issues := analyze.UndefinedWithImports(program, builtinSet(), baseDir)
+	for _, is := range issues {
+		diag.AddRootWithSeverity(sev, is.Code, is.Line, is.Column, is.Message,
+			"检查拼写；若是自定义函数/变量，请先定义")
+	}
+	return len(issues)
+}
 
 func main() {
 	startCPUProfile()
@@ -96,7 +157,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "错误: 请提供要执行的代码")
 			os.Exit(1)
 		}
-		runCode(args[1], noSAP, shadow, shadowLenient, strict)
+		runCode(args[1], "<内联>", noSAP, shadow, shadowLenient, strict)
 	case "-c", "--check":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "错误: 请提供要检查的文件")
@@ -110,8 +171,10 @@ func main() {
 		}
 		analyzeFile(args[1])
 	case "--emit-c":
+		cbackend.SetStrictTypes(strict)
 		emitCCommand(args[1:])
 	case "--emit-exe":
+		cbackend.SetStrictTypes(strict)
 		emitExeCommand(args[1:])
 	case "--py":
 		pyrt.RunREPL(os.Stdin, os.Stdout, os.Stderr)
@@ -149,11 +212,16 @@ func runFile(path string, noSAP, shadow, shadowLenient, strict bool) {
 	absPath, _ := filepath.Abs(path)
 	moduleManager = evaluator.NewModuleManager(filepath.Dir(absPath))
 	evaluator.SetModuleManager(moduleManager)
-	runCode(encoding.NormalizeSource(source), noSAP, shadow, shadowLenient, strict)
+	runCode(encoding.NormalizeSource(source), path, noSAP, shadow, shadowLenient, strict)
 }
 
 // runCode 解析并执行源代码
-func runCode(source string, noSAP, shadow, shadowLenient, strict bool) {
+func runCode(source, filename string, noSAP, shadow, shadowLenient, strict bool) {
+	compileFile = filename
+	pendingCompileDiag = nil
+	// 运行期诊断：严格模式下越界/缺键从「警告 + 返回空」升级为错误
+	evaluator.SetRuntimeStrict(strict)
+	evaluator.SetRuntimeFile(filename)
 	// 确保模块管理器存在（REPL 或 -e 模式下使用当前目录）
 	if moduleManager == nil {
 		moduleManager = evaluator.NewModuleManager(".")
@@ -164,36 +232,41 @@ func runCode(source string, noSAP, shadow, shadowLenient, strict bool) {
 	p := parser.New(l)
 
 	program := p.ParseProgram()
-	// 设置源码上下文，使错误报告显示源码行
-	p.Diagnostics().SetSource(source)
-	if p.Diagnostics().HasErrors() {
-		fmt.Fprint(os.Stderr, p.Diagnostics().Render())
+	// 设置源码/文件名上下文，使错误报告显示源码行与 file:line:col 定位
+	diag := p.Diagnostics()
+	diag.SetSource(source)
+	diag.SetFile(filename)
+	diag.SetStage("词法/语法")
+	if diag.HasErrors() {
+		diag.Dedupe()
+		fmt.Fprint(os.Stderr, diag.Render())
 		os.Exit(1)
 	}
 
 	// === 类型推断 + SAP 编译 ===
+	// 类型检查复用同一份诊断报告：避免「语法一块、类型一块」两次输出
 	inf := infer.New()
+	inf.SetDiagnostics(diag)
 	inf.Infer(program)
 
 	// === 类型检查 ===
 	// 默认：有类型错误时输出警告但不阻止执行
 	// --strict：有类型错误时阻止执行
 	typeErrors := inf.Errors()
-	if len(typeErrors) > 0 {
-		diag := diagnostic.New()
-		diag.SetSource(source)
-		for _, te := range typeErrors {
-			diag.AddRoot(diagnostic.ErrTypeMismatch.Code, te.Line, te.Column, te.Message, "")
-		}
+	undefCount := addUndefinedIssues(diag, program, diagnostic.SeverityWarning)
+	shadowCount := addShadowIssues(diag, program)
+	if len(typeErrors) > 0 || undefCount > 0 || shadowCount > 0 {
+		diag.SetStage("静态检查")
 		if strict {
 			// 严格模式：类型错误视为编译错误，不执行
+			diag.Dedupe()
 			fmt.Fprint(os.Stderr, diag.Render())
 			os.Exit(1)
 		}
-		// 默认：输出警告但继续执行
-		fmt.Fprint(os.Stderr, "⚠ 类型检查发现以下问题（警告，不阻止执行）：\n")
-		fmt.Fprint(os.Stderr, diag.Render())
-		fmt.Fprintln(os.Stderr)
+		// 默认：降级为警告后继续执行，但不立即输出——缓存到运行结束统一渲染
+		diag.SetSeverityAll(diagnostic.SeverityWarning)
+		diag.Dedupe()
+		pendingCompileDiag = diag
 	}
 
 	sap := evaluator.NewSAPCompiler(inf)
@@ -233,6 +306,8 @@ func runCode(source string, noSAP, shadow, shadowLenient, strict bool) {
 			if code == "" {
 				code = "E200"
 			}
+			diag.SetFile(filename)
+			diag.SetStage("运行期")
 			diag.AddRoot(code, errObj.Line, errObj.Column, errObj.Message, "")
 			fmt.Fprint(os.Stderr, diag.Render())
 			os.Exit(1)
@@ -306,28 +381,43 @@ func checkFile(path string) {
 		fmt.Fprintf(os.Stderr, "错误: 无法读取文件 %s: %v\n", path, err)
 		os.Exit(1)
 	}
-	checkCode(encoding.NormalizeSource(source))
+	checkCode(encoding.NormalizeSource(source), path)
 }
 
 // checkCode 对源代码进行静态类型检查
-func checkCode(source string) {
+func checkCode(source, filename string) {
+	compileFile = filename
 	l := lexer.New(source)
 	p := parser.New(l)
 
 	program := p.ParseProgram()
 	diag := p.Diagnostics()
 	diag.SetSource(source)
+	diag.SetFile(filename)
+	diag.SetStage("静态检查")
 
 	if diag.HasErrors() {
 		// 语法有错误，但继续进行类型检查以发现连锁错误
 		infer.CheckProgramWithDiagnostics(program, diag)
+		diag.Dedupe()
 		fmt.Fprint(os.Stderr, diag.Render())
 		os.Exit(1)
 	}
 
 	typeErrors := infer.CheckProgramWithDiagnostics(program, diag)
-	if len(typeErrors) == 0 && !diag.HasErrors() {
-		fmt.Println("✓ 类型检查通过，未发现类型错误")
+	undefCount := addUndefinedIssues(diag, program, diagnostic.SeverityError)
+	addShadowIssues(diag, program)
+	for _, is := range analyze.ImportErrors(program, checkBaseDir()) {
+		diag.AddRoot(is.Code, is.Line, is.Column, is.Message, "检查路径拼写与文件是否存在")
+		undefCount++
+	}
+	for _, is := range analyze.ConstantDivision(program) {
+		diag.AddRoot(is.Code, is.Line, is.Column, is.Message, "改成非零除数，或在运行前判断")
+		undefCount++
+	}
+	diag.Dedupe()
+	if len(typeErrors) == 0 && undefCount == 0 && !diag.HasErrors() {
+		fmt.Printf("✓ %s 类型检查通过，未发现类型错误\n", filename)
 	} else {
 		fmt.Fprint(os.Stderr, diag.Render())
 		os.Exit(1)
@@ -491,13 +581,24 @@ func printPrompt(out io.Writer) {
 func handleResult(result object.Object, source string) {
 	if result != nil && result.Type() == object.ERROR_OBJ {
 		errObj := result.(*object.Error)
-		diag := diagnostic.New()
-		diag.SetSource(source)
+		// 复用编译期报告：同一位置已有类型诊断时，运行期错误作为其连带影响，只输出一段报告
+		diag := pendingCompileDiag
+		if diag == nil {
+			diag = diagnostic.New()
+			diag.SetSource(source)
+		}
+		diag.SetFile(compileFile)
+		diag.SetStage("运行期")
 		code := errObj.Code
 		if code == "" {
 			code = "E200"
 		}
-		diag.AddRoot(code, errObj.Line, errObj.Column, errObj.Message, "")
+		if root := diag.FindRootOnLine(errObj.Line); root != nil && root.Code != code {
+			diag.AddCascade(root, code, errObj.Line, errObj.Column, errObj.Message, "")
+		} else {
+			diag.AddRoot(code, errObj.Line, errObj.Column, errObj.Message, "")
+		}
+		diag.Dedupe()
 		fmt.Fprint(os.Stderr, diag.Render())
 
 		// --debug 模式：输出调用栈和全局变量快照
@@ -517,6 +618,13 @@ func handleResult(result object.Object, source string) {
 			}
 		}
 		os.Exit(1)
+	}
+
+	// 正常结束：如果有缓存的类型警告，此时统一输出（不阻断）
+	if pendingCompileDiag != nil && pendingCompileDiag.Count() > 0 {
+		fmt.Fprint(os.Stderr, "⚠ 类型检查发现以下问题（警告，不阻止执行）：\n")
+		fmt.Fprint(os.Stderr, pendingCompileDiag.Render())
+		pendingCompileDiag = nil
 	}
 }
 

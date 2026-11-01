@@ -102,6 +102,25 @@ func snapshotStackTrace() []string {
 }
 
 // enrichError 为错误对象附加当前调用栈
+// attachCallPos 给没有位置信息的运行时错误补上调用点位置。
+// 内置函数（包含/取值/子串…）只产出消息文本，之前诊断里显示「无位置」，
+// 这里统一用被调函数名的位置回填，保证每条错误都能定位到源码。
+func attachCallPos(obj object.Object, node *ast.CallExpression) object.Object {
+	err, ok := obj.(*object.Error)
+	if !ok || err.Line != 0 || node == nil {
+		return obj
+	}
+	switch f := node.Function.(type) {
+	case *ast.Identifier:
+		err.Line, err.Column = f.Token.Line, f.Token.Column
+	case *ast.IndexExpression:
+		err.Line, err.Column = f.Token.Line, f.Token.Column
+	default:
+		err.Line, err.Column = node.Token.Line, node.Token.Column
+	}
+	return err
+}
+
 func enrichError(obj object.Object) object.Object {
 	if err, ok := obj.(*object.Error); ok && len(err.StackTrace) == 0 {
 		err.StackTrace = snapshotStackTrace()
@@ -863,7 +882,8 @@ func evalCallExpression(node *ast.CallExpression, env *object.Environment) objec
 		return applyFunction(fn, args)
 	case *object.Builtin:
 		result := fn.Fn(args...)
-		// 内置函数出错时，附加调用栈
+		// 内置函数出错时：补上调用点位置（内置实现只有消息，没有行列）+ 附加调用栈
+		result = attachCallPos(result, node)
 		return enrichError(result)
 	case *object.Define:
 		return applyDefine(fn, namedArgs)
@@ -973,7 +993,9 @@ func evalIndexExpression(node *ast.IndexExpression, env *object.Environment) obj
 
 	switch {
 	case left.Type() == object.ARRAY_OBJ && index.Type() == object.INTEGER_OBJ:
-		return evalArrayIndexExpression(left, index)
+		return evalArrayIndexExpression(node, left, index)
+	case left.Type() == object.STRING_OBJ && index.Type() == object.INTEGER_OBJ:
+		return evalStringIndexExpression(node, left, index)
 	case left.Type() == object.HASH_OBJ:
 		return evalHashIndexExpression(node, left, index)
 	case left.Type() == object.MODULE_OBJ:
@@ -991,14 +1013,41 @@ func evalIndexExpression(node *ast.IndexExpression, env *object.Environment) obj
 	}
 }
 
-func evalArrayIndexExpression(array, index object.Object) object.Object {
+func evalArrayIndexExpression(node ast.Node, array, index object.Object) object.Object {
 	arr := array.(*object.Array)
 	idx := index.(*object.Integer).Value
 
+	// 负下标从尾部计（与 Python 一致）
+	if idx < 0 {
+		idx += int64(len(arr.Elements))
+	}
 	if idx < 0 || idx >= int64(len(arr.Elements)) {
+		msg := fmt.Sprintf("数组索引越界: %d（长度 %d，有效范围 0..%d，负值从尾部计）", idx, len(arr.Elements), len(arr.Elements)-1)
+		if runtimeStrict {
+			return newErrorWithNode(node, diagnostic.ErrIndexOutOfBounds.Code, "%s", msg)
+		}
+		runtimeWarn(node, diagnostic.ErrIndexOutOfBounds.Code, msg)
 		return NULL
 	}
 	return arr.Elements[idx]
+}
+
+// evalStringIndexExpression 按下标取单个字符（UTF-8 码点口径，负下标从尾部计）
+func evalStringIndexExpression(node ast.Node, str, index object.Object) object.Object {
+	runes := []rune(str.(*object.String).Value)
+	idx := index.(*object.Integer).Value
+	if idx < 0 {
+		idx += int64(len(runes))
+	}
+	if idx < 0 || idx >= int64(len(runes)) {
+		msg := fmt.Sprintf("字符串下标越界: %d（长度 %d 个字符，负值从尾部计）", idx, len(runes))
+		if runtimeStrict {
+			return newErrorWithNode(node, diagnostic.ErrIndexOutOfBounds.Code, "%s", msg)
+		}
+		runtimeWarn(node, diagnostic.ErrIndexOutOfBounds.Code, msg)
+		return NULL
+	}
+	return &object.String{Value: string(runes[idx])}
 }
 
 func evalHashIndexExpression(node ast.Node, hash, index object.Object) object.Object {
@@ -1011,6 +1060,11 @@ func evalHashIndexExpression(node ast.Node, hash, index object.Object) object.Ob
 
 	pair, ok := h.Pairs[hashKey.HashKey()]
 	if !ok {
+		msg := fmt.Sprintf("哈希键不存在: %s（哈希表共 %d 个键）", index.Inspect(), len(h.Pairs))
+		if runtimeStrict {
+			return newErrorWithNode(node, diagnostic.ErrHashKeyNotFound.Code, "%s", msg)
+		}
+		runtimeWarn(node, diagnostic.ErrHashKeyNotFound.Code, msg)
 		return NULL
 	}
 	return pair.Value
@@ -1273,6 +1327,26 @@ func isError(obj object.Object) bool {
 
 // ==================== 内置函数注册 ====================
 
+// builtinNameList 内置函数名单（首次注册时填充，只读）
+var builtinNameList []string
+
+// BuiltinNames 返回全部内置函数名（已排序，供静态检查/文档生成使用）。
+// 静态检查不会执行程序，因此这里惰性触发一次注册，保证名单可用。
+func BuiltinNames() []string {
+	if len(builtinNameList) == 0 {
+		registerBuiltins(object.NewEnvironment())
+		// 命名空间对象（不是普通 builtin，但在 registerStringLib 里注入）
+		for _, ns := range builtinNamespaces {
+			builtinNameList = append(builtinNameList, ns)
+		}
+		sort.Strings(builtinNameList)
+	}
+	return builtinNameList
+}
+
+// builtinNamespaces 以「对象」形式注入的名称（静态检查同样视为已定义）
+var builtinNamespaces = []string{"文本", "系统", "JSON"}
+
 func registerBuiltins(env *object.Environment) {
 	builtins := map[string]object.BuiltinFunction{
 		// --- 通用 ---
@@ -1499,6 +1573,15 @@ func registerBuiltins(env *object.Environment) {
 		if b := object.GetBuiltin(name); b != nil {
 			env.Set(name, b)
 		}
+	}
+
+	// 记录内置名单（供静态检查判定「已定义」）：只写一次，避免重复分配
+	if len(builtinNameList) == 0 {
+		builtinNameList = make([]string, 0, len(builtins))
+		for name := range builtins {
+			builtinNameList = append(builtinNameList, name)
+		}
+		sort.Strings(builtinNameList)
 	}
 
 	// 字符串标准库命名空间（strlib_core.go）：文本.大写(...) / 文本.子串(...)

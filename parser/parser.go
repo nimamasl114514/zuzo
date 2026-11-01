@@ -52,6 +52,9 @@ type Parser struct {
 
 	errors []string
 	diag   *diagnostic.Report // 活字诊断报告
+	// loopDepth 当前所处的循环嵌套层数（函数字面量内重置为 0）
+	// 用于校验 跳出/跳过 只能出现在循环体内
+	loopDepth int
 
 	// 活字因果链：追踪最近产出的根因活字，用于将恢复期间的连锁错误
 	// 标记为 LevelCascade（连带影响）而非 LevelRoot（根因），
@@ -183,6 +186,24 @@ func (p *Parser) expectPeek(t token.TokenType) bool {
 	return true
 }
 
+// expectPeekOrUnclosed 期望下一个 token 为 t。
+// 如果已经到达文件末尾（EOF），说明对应的开符号从未闭合，报「未闭合」错误并指回开符号位置。
+// 其他不匹配情况仍走普通 peekError。
+func (p *Parser) expectPeekOrUnclosed(t token.TokenType, code, what string, openLine, openCol int) bool {
+	if p.peekTokenIs(t) {
+		p.nextToken()
+		return true
+	}
+	if p.peekTokenIs(token.EOF) {
+		p.addRootError(code, openLine, openCol,
+			fmt.Sprintf("%s未闭合：直到文件末尾（第 %d 行）都没有遇到 %s", what, p.peekToken.Line, tokenName(t)),
+			fmt.Sprintf("补上 %s，或检查是否漏写了右半边", tokenName(t)))
+		return false
+	}
+	p.peekError(t)
+	return false
+}
+
 // peekPrecedence 返回下一个 token 的中缀优先级
 // precedenceOf 静态优先级表：热路径（每个 token 两次查询）不查 map
 func precedenceOf(t token.TokenType) int {
@@ -266,6 +287,7 @@ func (p *Parser) ParseProgram() *ast.Program {
 	program := &ast.Program{}
 	program.Statements = []ast.Statement{}
 
+
 	for !p.curTokenIs(token.EOF) {
 		if p.curTokenIs(token.SEMICOLON) {
 			p.nextToken()
@@ -283,7 +305,39 @@ func (p *Parser) ParseProgram() *ast.Program {
 			// 不再 nextToken，让循环从该位置继续
 		}
 	}
+
+	// 词法层错误（未闭合字符串等）在扫描结束后并入诊断报告：
+	// 词法器不中断扫描，但必须在语法层报出来，否则无效源码会被当成合法程序。
+	// （必须在循环之后收集：错误是在 NextToken 扫描过程中产生的）
+	for _, le := range p.l.Errors() {
+		p.addRootError(le.Code, le.Line, le.Column, le.Message, "补上闭合引号，或把整个字面量删掉")
+	}
+	// 一个未闭合字符串会吞掉后续 token，连带出一串同行的语法错误；
+	// 把它们挂到词法根因下，避免「一个手误报三条根因」。
+	p.collapseLexCascades()
 	return program
+}
+
+// collapseLexCascades 把与词法错误同行的其他根因降级为连带影响
+func (p *Parser) collapseLexCascades() {
+	lexRoots := make(map[int]*diagnostic.Atom)
+	for _, a := range p.diag.Atoms() {
+		if a.Code == "E007" && a.Cause == nil {
+			lexRoots[a.Line] = a
+		}
+	}
+	if len(lexRoots) == 0 {
+		return
+	}
+	for _, a := range p.diag.Atoms() {
+		if a.Code == "E007" || a.Cause != nil || a.Level != diagnostic.LevelRoot {
+			continue
+		}
+		if root, ok := lexRoots[a.Line]; ok && root != a {
+			a.Cause = root
+			a.Level = diagnostic.LevelCascade
+		}
+	}
 }
 
 func (p *Parser) parseStatement() ast.Statement {
@@ -379,6 +433,14 @@ func (p *Parser) parseReturnStatement() *ast.ReturnStatement {
 	return stmt
 }
 
+// parseLoopBody 解析循环体：期间 loopDepth+1，供 跳出/跳过 的合法性检查
+func (p *Parser) parseLoopBody() *ast.BlockStatement {
+	p.loopDepth++
+	body := p.parseBlockStatement()
+	p.loopDepth--
+	return body
+}
+
 func (p *Parser) parseWhileStatement() *ast.WhileStatement {
 	stmt := &ast.WhileStatement{Token: p.curToken}
 	p.nextToken()
@@ -388,7 +450,7 @@ func (p *Parser) parseWhileStatement() *ast.WhileStatement {
 	if !p.expectPeek(token.LBRACE) {
 		return nil
 	}
-	stmt.Body = p.parseBlockStatement()
+	stmt.Body = p.parseLoopBody()
 	return stmt
 }
 
@@ -439,7 +501,7 @@ func (p *Parser) parseForStatement() ast.Statement {
 	if !p.expectPeek(token.LBRACE) {
 		return nil
 	}
-	stmt.Body = p.parseBlockStatement()
+	stmt.Body = p.parseLoopBody()
 	return stmt
 }
 
@@ -490,6 +552,14 @@ func (p *Parser) parseBlockStatement() *ast.BlockStatement {
 			p.nextToken()
 			p.syncToStatement()
 		}
+	}
+
+	// 到 EOF 仍未遇到 '}'：代码块未闭合（之前这里直接返回，导致「缺右花括号」被静默接受）
+	if p.curTokenIs(token.EOF) {
+		p.addRootError(diagnostic.ErrUnclosedBrace.Code, block.Token.Line, block.Token.Column,
+			fmt.Sprintf("代码块未闭合：第 %d 行的 '{' 直到文件末尾（第 %d 行）都没有对应的 '}'",
+				block.Token.Line, p.curToken.Line),
+			"在代码块结束处补上 '}'")
 	}
 	return block
 }
@@ -739,9 +809,10 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 }
 
 func (p *Parser) parseGroupedExpression() ast.Expression {
+	openLine, openCol := p.curToken.Line, p.curToken.Column
 	p.nextToken()
 	exp := p.parseExpression(_LOWEST)
-	if !p.expectPeek(token.RPAREN) {
+	if !p.expectPeekOrUnclosed(token.RPAREN, diagnostic.ErrUnclosedParen.Code, "分组表达式", openLine, openCol) {
 		return nil
 	}
 	return exp
@@ -811,12 +882,31 @@ func (p *Parser) parseFunctionLiteral() ast.Expression {
 	if !p.expectPeek(token.LBRACE) {
 		return nil
 	}
+	// 函数体内 跳出/跳过 不能作用于外层循环：进入函数时清零循环深度
+	savedLoopDepth := p.loopDepth
+	p.loopDepth = 0
 	lit.Body = p.parseBlockStatement()
+	p.loopDepth = savedLoopDepth
 	return lit
 }
 
 func (p *Parser) parseFunctionParameters() []*ast.Identifier {
 	identifiers := []*ast.Identifier{}
+	openLine, openCol := p.curToken.Line, p.curToken.Column
+	seen := make(map[string]bool, 4)
+	// checkDup 检查重复形参：f(a, a) 会让后一个覆盖前一个，属于静默错误
+	checkDup := func(id *ast.Identifier) {
+		if id == nil || id.Value == "" || id.Value == "_" {
+			return
+		}
+		if seen[id.Value] {
+			p.addRootError(diagnostic.ErrDuplicateParam.Code, id.Token.Line, id.Token.Column,
+				fmt.Sprintf("形参 %q 重复定义（前一个同名形参会失效）", id.Value),
+				"重命名其中一个形参")
+			return
+		}
+		seen[id.Value] = true
+	}
 
 	if p.peekTokenIs(token.RPAREN) {
 		p.nextToken()
@@ -836,6 +926,7 @@ func (p *Parser) parseFunctionParameters() []*ast.Identifier {
 		}
 		ident.TypeAnnot = p.curToken.Literal
 	}
+	checkDup(ident)
 	identifiers = append(identifiers, ident)
 
 	for p.peekTokenIs(token.COMMA) {
@@ -853,10 +944,11 @@ func (p *Parser) parseFunctionParameters() []*ast.Identifier {
 			}
 			ident.TypeAnnot = p.curToken.Literal
 		}
+		checkDup(ident)
 		identifiers = append(identifiers, ident)
 	}
 
-	if !p.expectPeek(token.RPAREN) {
+	if !p.expectPeekOrUnclosed(token.RPAREN, diagnostic.ErrUnclosedParen.Code, "形参列表", openLine, openCol) {
 		return nil
 	}
 	return identifiers
@@ -902,6 +994,7 @@ func (p *Parser) parseCallExpression(fn ast.Expression) ast.Expression {
 func (p *Parser) parseCallArguments() ([]ast.Expression, []ast.NamedArg) {
 	args := []ast.Expression{}
 	namedArgs := []ast.NamedArg{}
+	openLine, openCol := p.curToken.Line, p.curToken.Column
 
 	if p.peekTokenIs(token.RPAREN) {
 		p.nextToken()
@@ -934,7 +1027,7 @@ func (p *Parser) parseCallArguments() ([]ast.Expression, []ast.NamedArg) {
 		}
 	}
 
-	if !p.expectPeek(token.RPAREN) {
+	if !p.expectPeekOrUnclosed(token.RPAREN, diagnostic.ErrUnclosedParen.Code, "函数调用", openLine, openCol) {
 		return nil, nil
 	}
 	return args, namedArgs
@@ -942,6 +1035,7 @@ func (p *Parser) parseCallArguments() ([]ast.Expression, []ast.NamedArg) {
 
 func (p *Parser) parseArrayLiteral() ast.Expression {
 	array := &ast.ArrayLiteral{Token: p.curToken}
+	openLine, openCol := p.curToken.Line, p.curToken.Column
 
 	if p.peekTokenIs(token.RBRACKET) {
 		p.nextToken()
@@ -956,7 +1050,7 @@ func (p *Parser) parseArrayLiteral() ast.Expression {
 		array.Elements = append(array.Elements, p.parseExpression(_LOWEST))
 	}
 
-	if !p.expectPeek(token.RBRACKET) {
+	if !p.expectPeekOrUnclosed(token.RBRACKET, diagnostic.ErrUnclosedBracket.Code, "数组字面量", openLine, openCol) {
 		return nil
 	}
 	return array
@@ -965,6 +1059,7 @@ func (p *Parser) parseArrayLiteral() ast.Expression {
 func (p *Parser) parseHashLiteral() ast.Expression {
 	hash := &ast.HashLiteral{Token: p.curToken}
 	hash.Pairs = make(map[ast.Expression]ast.Expression)
+	openLine, openCol := p.curToken.Line, p.curToken.Column
 
 	for !p.peekTokenIs(token.RBRACE) {
 		p.nextToken()
@@ -983,7 +1078,7 @@ func (p *Parser) parseHashLiteral() ast.Expression {
 		}
 	}
 
-	if !p.expectPeek(token.RBRACE) {
+	if !p.expectPeekOrUnclosed(token.RBRACE, diagnostic.ErrUnclosedBrace.Code, "哈希表字面量", openLine, openCol) {
 		return nil
 	}
 	return hash
@@ -991,10 +1086,11 @@ func (p *Parser) parseHashLiteral() ast.Expression {
 
 func (p *Parser) parseIndexExpression(left ast.Expression) ast.Expression {
 	exp := &ast.IndexExpression{Token: p.curToken, Left: left}
+	openLine, openCol := p.curToken.Line, p.curToken.Column
 	p.nextToken()
 	exp.Index = p.parseExpression(_LOWEST)
 
-	if !p.expectPeek(token.RBRACKET) {
+	if !p.expectPeekOrUnclosed(token.RBRACKET, diagnostic.ErrUnclosedBracket.Code, "索引表达式", openLine, openCol) {
 		return nil
 	}
 	return exp
@@ -1095,7 +1191,7 @@ func (p *Parser) parseTryCatchStatement() ast.Statement {
 	if !p.expectPeek(token.LBRACE) {
 		return nil
 	}
-	stmt.Body = p.parseBlockStatement()
+	stmt.Body = p.parseLoopBody()
 
 	if !p.peekTokenIs(token.CATCH) {
 		p.addRootError(diagnostic.ErrExpectedToken.Code, p.curToken.Line, p.curToken.Column,
@@ -1148,7 +1244,7 @@ func (p *Parser) parseForInRest(varName, indexName string) ast.Statement {
 	if !p.expectPeek(token.LBRACE) {
 		return nil
 	}
-	stmt.Body = p.parseBlockStatement()
+	stmt.Body = p.parseLoopBody()
 
 	return stmt
 }
@@ -1156,6 +1252,11 @@ func (p *Parser) parseForInRest(varName, indexName string) ast.Statement {
 // parseBreakStatement 解析跳出语句
 func (p *Parser) parseBreakStatement() ast.Statement {
 	stmt := &ast.BreakStatement{Token: p.curToken}
+	if p.loopDepth == 0 {
+		p.addRootError(diagnostic.ErrBreakOutsideLoop.Code, p.curToken.Line, p.curToken.Column,
+			"'跳出' 只能用在 当/对于 循环体内（当前不在任何循环中）",
+			"把 跳出 移进循环体，或改用 返回 结束函数")
+	}
 	if p.peekTokenIs(token.SEMICOLON) {
 		p.nextToken()
 	}
@@ -1165,6 +1266,11 @@ func (p *Parser) parseBreakStatement() ast.Statement {
 // parseContinueStatement 解析跳过语句
 func (p *Parser) parseContinueStatement() ast.Statement {
 	stmt := &ast.ContinueStatement{Token: p.curToken}
+	if p.loopDepth == 0 {
+		p.addRootError(diagnostic.ErrBreakOutsideLoop.Code, p.curToken.Line, p.curToken.Column,
+			"'跳过' 只能用在 当/对于 循环体内（当前不在任何循环中）",
+			"把 跳过 移进循环体")
+	}
 	if p.peekTokenIs(token.SEMICOLON) {
 		p.nextToken()
 	}

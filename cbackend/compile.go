@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"zuzo/ast"
+	"zuzo/diagnostic"
+	"zuzo/infer"
 	"zuzo/lexer"
 	"zuzo/nativecc"
 	"zuzo/parser"
@@ -65,6 +67,11 @@ func FindCompiler() (*Compiler, error) {
 	return nil, fmt.Errorf("未找到 C 编译器：请安装 gcc/clang，或设置环境变量 ZUZO_CC 指向编译器")
 }
 
+// DiagError 携带已渲染好的诊断文本，CLI 直接输出即可（不再加「C 后端错误:」前缀）
+type DiagError struct{ Text string }
+
+func (e *DiagError) Error() string { return e.Text }
+
 // ParseFile 读取并解析一个 .hy 源文件
 func ParseFile(path string) (*ast.Program, error) {
 	src, err := os.ReadFile(path)
@@ -74,10 +81,39 @@ func ParseFile(path string) (*ast.Program, error) {
 	l := lexer.New(string(src))
 	p := parser.New(l)
 	prog := p.ParseProgram()
-	if p.Diagnostics().HasErrors() {
-		return nil, fmt.Errorf("语法错误：\n%s", p.Diagnostics().Render())
+	diag := p.Diagnostics()
+	if diag.HasErrors() {
+		diag.SetSource(string(src))
+		diag.SetFile(path)
+		diag.SetStage("词法/语法")
+		diag.Dedupe()
+		return nil, &DiagError{Text: diag.Render()}
 	}
 	return prog, nil
+}
+
+// 类型检查严格开关：默认只警告（与解释器一致），true 时阻止生成代码
+var strictTypes bool
+
+// SetStrictTypes 开启/关闭类型严格模式（对应 --strict）
+func SetStrictTypes(v bool) { strictTypes = v }
+
+// CheckProgram 对已经展开导入的程序做类型检查。
+// 返回已渲染的诊断文本（可能为空）与是否命中。
+// C 后端此前只跑语法层，导致「能生成 C 就当作能编译」——类型错误被漏报；
+// 但类型推断目前仍有假阳（如内置函数带默认参数），因此默认只警告。
+func CheckProgram(prog *ast.Program, path, source string) (string, bool) {
+	diag := diagnostic.New()
+	diag.SetSource(source)
+	diag.SetFile(path)
+	diag.SetStage("类型检查")
+	errs := infer.CheckProgramWithDiagnostics(prog, diag)
+	if len(errs) == 0 && !diag.HasErrors() {
+		return "", false
+	}
+	diag.Dedupe()
+	diag.SetSeverityAll(diagnostic.SeverityWarning)
+	return diag.Render(), true
 }
 
 // expandImports 编译期展开「导入」：把被导入文件的顶层语句并入当前程序。
@@ -104,6 +140,12 @@ func expandImports(prog *ast.Program, baseDir string, seen map[string]bool, dept
 		if err != nil {
 			return err
 		}
+		// 与解释器模块系统对齐：导入 "词法" 这种省略扩展名的写法补 .hy
+		if filepath.Ext(abs) == "" {
+			if _, statErr := os.Stat(abs + ".hy"); statErr == nil {
+				abs += ".hy"
+			}
+		}
 		if seen[abs] {
 			continue
 		}
@@ -123,6 +165,10 @@ func expandImports(prog *ast.Program, baseDir string, seen map[string]bool, dept
 
 // EmitC 解析 .hy 并生成 C 源码文本
 func EmitC(path string) (string, *ast.Program, error) {
+	src, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return "", nil, fmt.Errorf("无法读取文件 %s: %w", path, readErr)
+	}
 	prog, err := ParseFile(path)
 	if err != nil {
 		return "", nil, err
@@ -131,7 +177,16 @@ func EmitC(path string) (string, *ast.Program, error) {
 	if err := expandImports(prog, filepath.Dir(abs), map[string]bool{abs: true}, 0); err != nil {
 		return "", prog, err
 	}
-	code, err := Generate(prog, Options{SourcePath: path})
+	// 编译能力闸门：语法通过不等于能编译。
+	// 类型检查前置，让 --emit-c / --emit-exe 与解释器、-c 的接受集合一致；
+	// 默认只警告不阻断（推断器仍有假阳，避免误伤合法程序），--strict 才阻断。
+	if warnText, hit := CheckProgram(prog, path, string(src)); hit {
+		if strictTypes {
+			return "", prog, &DiagError{Text: warnText}
+		}
+		fmt.Fprint(os.Stderr, warnText)
+	}
+	code, err := Generate(prog, Options{SourcePath: path, Strict: strictTypes})
 	if err != nil {
 		return "", prog, err
 	}

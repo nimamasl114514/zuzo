@@ -686,6 +686,10 @@ func (i *Inferencer) inferExpr(expr ast.Expression) Type {
 			if lt == THash {
 				i.addConstraint(indexType, TStr, n.Index)
 				resultT = TAny
+			} else if lt == TStr {
+				// 字符串按下标取单个字符（UTF-8 码点口径），结果仍是字符串
+				i.addConstraint(indexType, TInt, n.Index)
+				resultT = TStr
 			} else if lt == TAny {
 				resultT = TAny
 			} else {
