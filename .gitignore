@@ -66,3 +66,6 @@ fuzz/reports/work/
 
 # lxread 索引缓存（第29轮）
 .lxread/
+
+# LLVM 后端基准产物（第31轮）
+bench/llvmbackend/_out/
