@@ -9,7 +9,7 @@
 
 ## 0. 一句话结论
 
-zuzo 当前是一个**单二进制交付的脚本/服务端运行时**：能用中文语法（`.hy`）、Python 语法（`.py`）、或两者混写（`.hypy`）写 **CLI 工具、HTTP API 服务、网页自动化脚本、数据/文本处理脚本、C 库桥接工具、带 BDD 测试的工程脚本**；**不能**写自绘 GUI 桌面程序，也不能直接跑依赖 CPython C 扩展（numpy/pandas 类）的代码。
+zuzo 当前是一个**单二进制交付的脚本/服务端运行时**：能用中文语法（`.hy`）、Python 语法（`.py`）、或两者混写（`.hypy`）写 **CLI 工具、HTTP API 服务、网页自动化脚本、数据/文本处理脚本、C 库桥接工具、带 BDD 测试的工程脚本**；**不能**写自绘 GUI 桌面程序；依赖 CPython C 扩展（numpy/pandas 类）的代码 **✅ 走 pyext 子进程桥（第32轮）**，由本机 CPython 子进程承载，不再是硬边界（见 §2.1）。
 
 ---
 
@@ -44,8 +44,29 @@ zuzo 当前是一个**单二进制交付的脚本/服务端运行时**：能用�
 | 11 | **性能敏感的热点计算** | 五层执行栈（Tree-Walk → SAP 闭包熔合 → 原生 int64 → Smi → De Bruijn） | README 基准（同机 1e6 整数循环中位数）：zuzo SAP 23.6 ms / 内嵌 Python 21.1 ms / CPython 3.12 165.3 ms | ✅ 声明值，本轮未复跑 |
 | 12 | **GUI 桌面程序** | 无窗口/控件/绘图库；`打开浏览器` 是驱动外部 Chromium，不是自绘 | 内置表 175 项中无任何 GUI 类函数 | ❌ 不支持 |
 | 13 | **需要 sqlite3 / ssl / http.server / multiprocessing 的程序** | 标准库未实现这四个模块 | `modscan.py`：四项均 `ModuleNotFoundError` | ❌ 不支持 |
-| 14 | **依赖 CPython C 扩展的库（numpy/pandas）** | `ctypes` 只能加载普通 C ABI 动态库，不能加载 `.pyd` | `docs/ctypes.md` §三 明确 ABI 边界；`ctypes.create_string_buffer` 实测未实现 | ❌ 不支持 |
+| 14 | **依赖 CPython C 扩展的库（numpy/pandas）** | ✅ 走 pyext 子进程桥（第32轮）：`py导入 / py调 / py方法 / py取值` 在外部 CPython 子进程里执行，`.pyd` 由 CPython 自己加载，绕开 zuzo 侧 ABI 边界 | `pyext/child.py` + `pyext/client.go`（JSON Lines over stdio）；命令口径见 §2.1（输出待回填） | ✅ 走 pyext 子进程桥（第32轮） |
 | 15 | **以 `.wasm` 模块为核心的插件程序** | WASM FFI 8 内置（wazero），能力齐 | 仓库无 `.wasm` 产物（`find . -name "*.wasm"` 空，只有 `math.wat`） | ⚠️ 需自备 `.wasm`，本轮未实测 |
+
+### 2.1 第三方 CPython 库（numpy / pandas / requests 等）
+
+> 2026-11-01 第32轮新增。`pyext` 子进程桥把「本机 CPython + site-packages」接成 zuzo 的外部运行时：`py导入("numpy")` 拿到的是**子进程里的真实对象句柄**，`py调 / py方法 / py取值` 直接在 CPython 里执行，`.pyd` C 扩展不再受 zuzo 自身对象模型与 ABI 限制。
+> 口径声明：下表 5 条命令是本节的验收口径，**全部于 2026-11-01 实跑并回填原始输出**（本机 CPython 3.12.13 / numpy 2.5.1 / pandas 3.0.3）。
+
+| # | 场景 | 命令（项目根目录执行） | 实测输出 |
+|---|---|---|---|
+| 1 | 导入模块 + 句柄 + 桥信息 | `./zuzo.exe -e '变量 np = py导入("numpy"); 打印(py描述(np)); 打印(py信息())'` | `<module 'numpy' from '...\site-packages\numpy\__init__.py'>`<br>`{版本: 3.12.13, 解释器: ...\python-env\python.exe, 实现: CPython, 模式: 子进程, 调用次数: 4, 失败次数: 0, 运行秒数: 0.1135566}` |
+| 2 | ndarray 构造 + 归约 | `./zuzo.exe -e '变量 np = py导入("numpy"); 变量 a = py方法(np, "arange", 12); 变量 m = py方法(py方法(a, "reshape", 3, 4), "sum"); 打印(m); 打印(类型(m))'` | `66`<br>`整数`（numpy 标量按 `item()` 解包成 int64） |
+| 3 | DataFrame 分组求和 + 快照 | `./zuzo.exe -e '变量 pd = py导入("pandas"); 变量 df = py方法(pd, "DataFrame", {"城市": ["北京", "上海", "上海"], "销量": [3, 5, 2]}); 打印(py取值(py方法(py方法(df, "groupby", "城市"), "sum"))); 打印(类型(py取值(df)))'` | `[{销量: 7}, {销量: 3}]`<br>`数组`（`py取值` = `to_dict("records")` 快照，索引不保留） |
+| 4 | 老代码自动降级（粘性） | `./zuzo.exe -e 'py执行("import numpy as np"); 打印(py求值("int(np.arange(5).sum())")); 打印(py模式())'` | `10`<br>`子进程`（纯 Go 运行时失败 → 自动拉起 CPython → 重放 → 粘住） |
+| 5 | 错误路径 | `./zuzo.exe -e 'py导入("zuzo_no_such_module_xyz")'` | 退出码 1；`✘ 根因 [E912]: Python ModuleNotFoundError: No module named 'zuzo_no_such_module_xyz'` + 子进程 traceback |
+
+配套内置（14 个）：`py导入 / py取 / py设 / py调 / py调参 / py方法 / py取值 / py描述 / py类型 / py释放 / py模式 / py信息 / py有库 / py安装`（`py调参` 是关键字参数通道）。
+
+- `py有库(名)`：`importlib.util.find_spec` 探测，不实际导入，用于特性门控。
+- `py安装(包名)`：显式 `python -m pip install`，**不自动、不隐式联网**；缺库时由使用者决定是否安装。
+- 语义口径：句柄是**引用语义**（同一 id 指向子进程同一对象），zuzo 原生容器跨桥是**快照语义**（与既有 mix 桥一致）；`ndarray` 一律给句柄（保留 `.sum()`/`.reshape()`/`.dtype` 等方法），要原生数组用 `py取值(h)`。
+- 子进程 `print()` 重定向到 **stderr**，stdin/stdout 专用于 JSON Lines 协议，因此 `py执行` 里的打印不会污染返回值。
+- 失败可见：子进程崩溃/超时由 Go 侧检测并按需重启，重启后旧句柄失效（需重新 `py导入`）；错误码表见 `docs/python-bridge.md` 第七节。
 
 ---
 
@@ -294,7 +315,7 @@ sqrt 地址: 140724026179952
 **不适合**
 
 - 需要 GUI 的自绘桌面应用（用 Electron / WPF / Qt）。
-- 依赖 numpy / pandas / 任何 `.pyd` 扩展的数据科学流水线。
+- 依赖 numpy / pandas / 任何 `.pyd` 扩展的数据科学流水线 —— **已解除**：改走 pyext 子进程桥（第32轮，见 §2.1），代价是每次跨桥调用的进程通信开销与快照拷贝。
 - 需要 `sqlite3` / `ssl` / `multiprocessing` / `http.server` 的 Python 程序。
 - 要求 CPython 精确语义（3.12 特性、完整标准库）的既有大型 Python 项目。
 - 以 `执行/遇到` 为核心错误处理策略的代码（当前构建不生效）。

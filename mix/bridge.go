@@ -59,6 +59,14 @@ func (b *Bridge) install() {
 		}
 		fn, ok := b.LookupPy(name.Value)
 		if !ok {
+			// 第32轮：进程内没有 → 若已切子进程 CPython，按名字调远端
+			if PyExt != nil && PyExt.Active() {
+				if v, err := PyExt.CallName(name.Value, args[1:]); err == nil {
+					return v
+				} else {
+					return errObj("E902", err.Error())
+				}
+			}
 			return errObj("E901", "Python 侧未定义："+name.Value)
 		}
 		pyargs := make([]pyobj.Object, 0, len(args)-1)
@@ -82,6 +90,12 @@ func (b *Bridge) install() {
 		}
 		v, ok := b.LookupPy(name.Value)
 		if !ok {
+			// 第32轮：子进程模式下降级到远端 globals
+			if PyExt != nil && PyExt.Active() {
+				if rv, found := PyExt.Lookup(name.Value); found {
+					return rv
+				}
+			}
 			return errObj("E901", "Python 侧未定义："+name.Value)
 		}
 		return b.ToZuzo(v)
@@ -95,6 +109,12 @@ func (b *Bridge) install() {
 		if !ok {
 			return errObj("E900", "py设置 的第一个参数必须是字符串（变量名）")
 		}
+		if PyExt != nil && PyExt.Active() {
+			if err := PyExt.SetName(name.Value, args[1]); err != nil {
+				return errObj("E902", err.Error())
+			}
+			return evaluator.NULL
+		}
 		b.IP.Globals.Set(name.Value, b.ToPy(args[1]))
 		return evaluator.NULL
 	})
@@ -107,8 +127,15 @@ func (b *Bridge) install() {
 		if !ok {
 			return errObj("E900", "py存在 的参数必须是字符串（变量名）")
 		}
-		_, ok = b.LookupPy(name.Value)
-		return &object.Boolean{Value: ok}
+		if _, ok = b.LookupPy(name.Value); ok {
+			return &object.Boolean{Value: true}
+		}
+		if PyExt != nil && PyExt.Active() {
+			if _, found := PyExt.Lookup(name.Value); found {
+				return &object.Boolean{Value: true}
+			}
+		}
+		return &object.Boolean{Value: false}
 	})
 
 	b.defineZuzo("py求值", func(args ...object.Object) object.Object {
@@ -119,8 +146,26 @@ func (b *Bridge) install() {
 		if !ok {
 			return errObj("E900", "py求值 的参数必须是字符串")
 		}
+		// 第32轮：已切子进程 → 直接远端求值（命名空间一致）
+		if PyExt != nil && PyExt.Active() {
+			v, err := PyExt.Eval(code.Value)
+			if err != nil {
+				return errObj("E903", err.Error())
+			}
+			return v
+		}
 		res, err := b.EvalPyExpr(code.Value)
 		if err != nil {
+			// 命中 C 扩展 → 自动拉起子进程 CPython 并重放同一表达式
+			if PyExt != nil && shouldFallback(code.Value, err.Error()) {
+				if actErr := PyExt.Activate(); actErr == nil {
+					if v, e2 := PyExt.Eval(code.Value); e2 == nil {
+						return v
+					} else {
+						return errObj("E903", e2.Error())
+					}
+				}
+			}
 			return errObj("E903", err.Error())
 		}
 		return b.ToZuzo(res)
@@ -134,7 +179,24 @@ func (b *Bridge) install() {
 		if !ok {
 			return errObj("E900", "py执行 的参数必须是字符串")
 		}
+		// 第32轮：已切子进程 → 直接远端执行
+		if PyExt != nil && PyExt.Active() {
+			if err := PyExt.Exec(code.Value); err != nil {
+				return errObj("E904", err.Error())
+			}
+			return evaluator.NULL
+		}
 		if err := b.ExecPy(code.Value); err != nil {
+			// 命中 C 扩展 → 自动拉起子进程 CPython 并重放同一段代码
+			if PyExt != nil && shouldFallback(code.Value, err.Error()) {
+				if actErr := PyExt.Activate(); actErr == nil {
+					if e2 := PyExt.Exec(code.Value); e2 == nil {
+						return evaluator.NULL
+					} else {
+						return errObj("E904", e2.Error())
+					}
+				}
+			}
 			return errObj("E904", err.Error())
 		}
 		return evaluator.NULL

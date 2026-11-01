@@ -17,10 +17,12 @@ package main
 import (
 	"io"
 	"os"
+	"strings"
 
 	"zuzo/evaluator"
 	"zuzo/mix"
 	"zuzo/object"
+	"zuzo/pyext"
 	pyrt "zuzo/py/runtime"
 )
 
@@ -70,10 +72,42 @@ func installCrossBridge(env *object.Environment, out, errw io.Writer) *mix.Bridg
 	return b
 }
 
+// ---------- 真实 CPython 子进程桥适配（第32轮） ----------
+
+// pyExtAdapter 把 pyext.Client 适配成 mix.PyExternal（mix 不直接依赖 pyext）
+type pyExtAdapter struct{ c *pyext.Client }
+
+func (a pyExtAdapter) Active() bool { return a.c.Active() }
+func (a pyExtAdapter) Activate() error {
+	a.c.SetNotice(os.Stderr)
+	return a.c.Activate()
+}
+func (a pyExtAdapter) Exec(code string) error       { return a.c.Exec(code) }
+func (a pyExtAdapter) Eval(expr string) (object.Object, error) { return a.c.Eval(expr) }
+func (a pyExtAdapter) Lookup(name string) (object.Object, bool) { return a.c.Lookup(name) }
+func (a pyExtAdapter) CallName(name string, args []object.Object) (object.Object, error) {
+	return a.c.CallName(name, args)
+}
+func (a pyExtAdapter) SetName(name string, v object.Object) error { return a.c.SetName(name, v) }
+func (a pyExtAdapter) Native(v object.Object) (object.Object, error) {
+	p, ok := v.(*object.PyObj)
+	if !ok {
+		return v, nil
+	}
+	return a.c.Native(p)
+}
+
 // initInterop 在启动时注册：纯 .py 入口也会装桥（通过 pyrt.InteropHook）
+// 同时把外部 CPython 子进程桥注入 mix 层：
+//   - ZUZO_PY_BRIDGE=0 → 禁用（保持第31轮及以前的纯进程内语义）
+//   - 其他值 / 未设置 → auto（命中 C 扩展时自动切子进程）
 func initInterop() {
 	pyrt.InteropHook = func(ip *pyrt.Interp) {
 		crossPyInterp = ip
 		installCrossBridge(nil, os.Stdout, os.Stderr)
 	}
+	if v := strings.TrimSpace(os.Getenv("ZUZO_PY_BRIDGE")); v == "0" || strings.EqualFold(v, "off") || strings.EqualFold(v, "false") {
+		return
+	}
+	mix.PyExt = pyExtAdapter{c: pyext.Default()}
 }

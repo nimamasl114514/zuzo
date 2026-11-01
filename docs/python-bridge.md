@@ -1,0 +1,245 @@
+# Python 子进程桥（`.hy` 无缝调用 CPython 库）
+
+> 第 32 轮（2026-11-01）。目标：**在 `.hy` 里像调内置函数一样调任意已安装的 Python 库**——含 `numpy` / `pandas` / `requests` 这类带 C 扩展的包。
+> 事实源优先级：**源码 > 实跑 > 文档**。本文所有数字与输出均为本机实测（Windows 11 / CPython 3.12.13 / numpy 2.5.1 / pandas 3.0.3）。
+
+---
+
+## 一、为什么必须是子进程
+
+`py/` 包是用 Go 重写的 Python 运行时，能跑 Python 语法与常用标准库，但**没有 CPython 的 C-ABI**：
+
+| 层 | 能做到 | 做不到 |
+|---|---|---|
+| `py/runtime`（纯 Go） | 语法、对象模型、内置函数、`json/re/math/datetime` 等子集 | 加载 `.pyd`/`.so`、调 CPython C-API |
+| CPython 子进程 | 全部 site-packages 与 C 扩展 | 与 zuzo 共享进程内对象 |
+
+`numpy` 的 `ndarray` 是 C 结构体，`pandas` 依赖它，`requests` 依赖 `ssl` 的 C 实现——纯 Go 侧无法模拟，只能**让真 CPython 跑起来，zuzo 跨进程下单**：
+
+```
+zuzo.exe (Go)                              python.exe (CPython 3.x)
+┌────────────────────────────┐             ┌──────────────────────────────┐
+│ py导入 / py调 / py方法      │   stdin →   │ child.py                     │
+│ py取 / py设 / py取值        │             │  协议循环（JSON Lines）      │
+│ pyext/client.go             │   ← stdout  │  句柄表 map[int, object]     │
+│ 惰性启动·探测·超时·互斥      │   stderr ←  │  真实 import / call          │
+└────────────────────────────┘             └──────────────────────────────┘
+```
+
+- **stdin/stdout 专供协议**（一行一条 JSON），用户 `print()` 全部重定向到 stderr，不污染协议流；
+- **句柄语义**：模块、`ndarray`、`DataFrame`、函数不序列化，zuzo 侧只持 `Python对象`（ID + 类型名 + repr + 可调用标志），操作回子进程执行；
+- **惰性**：只有真的用 `py*` 才拉起进程，纯 `.hy` 脚本零额外开销。
+
+---
+
+## 二、开关与环境变量
+
+| 环境变量 | 取值 | 行为 |
+|---|---|---|
+| `ZUZO_PY_BRIDGE` | 未设 / 其他值 | **auto**：`py执行`/`py求值` 失败时自动切子进程 |
+| | `0` / `off` / `false` | **禁用**：保持纯 Go 语义（老版本行为），C 扩展照旧报错 |
+| `ZUZO_PYTHON` | 解释器路径 | 覆盖自动探测（顺序：`ZUZO_PYTHON` → `python` → `python3` → 常见安装位置 → `py -3`） |
+| `ZUZO_PY_TIMEOUT` | 毫秒，默认 `120000` | 单次往返上限；超时杀子进程并在下次调用重启 |
+| `ZUZO_PY_BRIDGE_QUIET` | `1` | 不打印模式切换提示 |
+
+解释器探测会先跑 `-c "import sys;print(major.minor)"` 验证是 **CPython ≥ 3.8**；不满足的候选逐个跳过，错误里保留每个候选的失败原因。
+
+---
+
+## 三、自动降级：老代码不改一行
+
+```zuzo
+py执行("import numpy as np")     // 第 1 步：纯 Go 运行时尝试 → 在 numpy/core/_multiarray_umath 处失败
+                                  // 第 2 步：识别为「需要真 CPython」→ 自动拉起子进程
+                                  // 第 3 步：子进程重放同一段代码 → 成功
+打印(py求值("int(np.arange(10).sum())"))   // 45（此后粘性子进程模式，共用同一份 globals）
+```
+
+判定不是只看 `ImportError`：实测 numpy 的 `__init__.py` 是纯 Python，真正炸点是
+`AttributeError: module 'os' has no attribute 'add_dll_directory'`（delvewheel 补丁），所以判据包含
+`needs external CPython` / `C extension` / `add_dll_directory` / `site-packages` / `.pyd` / `delvewheel`，
+以及「代码里有 `import` 且报 ImportError / ModuleNotFoundError / AttributeError」。
+
+- **粘性**：降级成功后，本进程后续所有 `py执行`/`py求值`/`py导入`/`py获取`/`py设置`/`py调用` 都走子进程；
+- **可查可切**：`py模式()` 返回 `"本地"` / `"子进程"`；`py模式("子进程")` 强制切换，`py模式("本地")` 切回；
+- **副作用不迁移**：降级前在纯 Go 运行时里赋的变量不会搬到子进程（失败的那段代码是在子进程里**重放**的）。需要连续状态就直接 `py模式("子进程")` 起手。
+
+---
+
+## 四、内置函数速查
+
+| 函数 | 签名 | 返回 | 示例 |
+|---|---|---|---|
+| `py导入` | `py导入(模块名)` | 模块句柄 | `py导入("numpy")` |
+| `py取` | `py取(句柄, 属性名)` | 值 / 句柄 | `py取(np, "pi")` |
+| `py设` | `py设(句柄, 属性名, 值)` | 空 | `py设(df, "c", [7,7,7])` |
+| `py调` | `py调(可调用句柄, 参数...)` | 值 / 句柄 | `py调(py取(np,"sum"), [1,2,3])` |
+| `py调参` | `py调参(可调用句柄, 参数数组, 命名参数字典)` | 值 / 句柄 | `py调参(f, [1], {"timeout": 10})` |
+| `py方法` | `py方法(句柄, "方法名", 参数...)` | 值 / 句柄 | `py方法(df, "head", 5)` |
+| `py取值` | `py取值(句柄)` / `py取值(句柄, 键)` | 原生值 / 值 | `py取值(a)`（ndarray→嵌套数组）· `py取值(df,"a")`（取列） |
+| `py描述` | `py描述(句柄)` | 字符串（repr） | `py描述(np)` |
+| `py类型` | `py类型(句柄)` | 字符串（远端类型名） | `py类型(a)` → `ndarray` |
+| `py释放` | `py释放(句柄)` | 空 | `py释放(df)` |
+| `py模式` | `py模式()` / `py模式("子进程"\|"本地")` | 字符串 | `py模式("子进程")` |
+| `py信息` | `py信息()` | 哈希表 | `py信息()["版本"]` |
+| `py有库` | `py有库(模块名)` | 布尔（`find_spec`，不导入） | `py有库("torch")` |
+| `py安装` | `py安装(包名)` | 哈希 `{成功, 输出, 错误?}` | `py安装("openpyxl")` |
+
+要点：
+
+- **参数是变参**：`py调(f, 1, 2)` 就是 `f(1, 2)`；要传数组本身请直接写字面量 `py调(f, [1,2,3])`。
+- `py方法(x, "m", ...)` = `py调(py取(x, "m"), ...)`，省一次取属性。
+- `py取值(h)` 是「把远端对象拍平成原生值」：`ndarray→嵌套数组`、`DataFrame→records`、`Series→数组`、`set/tuple→数组`、`bytes→base64 文本`。
+- `py有库` 与 `py安装` 是显式动作；桥**不会**在背后偷偷联网装包。
+
+---
+
+## 五、值转换规则
+
+### 5.1 zuzo → Python
+
+| zuzo | Python |
+|---|---|
+| 整数 / 浮点 / 字符串 / 布尔 / 空 | `int` / `float` / `str` / `bool` / `None` |
+| 数组 | `list`（递归，快照） |
+| 字典 | `dict`（键按 zuzo 哈希键转换） |
+| `Python对象` 句柄 | **原对象本身**（引用） |
+| `.hy` 函数 / 内置 | 转成字符串，不能回调（桥是单向的） |
+
+### 5.2 Python → zuzo
+
+| Python 值 | zuzo 侧 | 语义 |
+|---|---|---|
+| `None` / `bool` / `int` / `float` / `str` | 同名标量 | 快照；`int` 超出 int64 → 字符串（不静默截断） |
+| `bytes` / `bytearray` | 字符串（base64） | 快照 |
+| `list` / `tuple` / `range` / `set` / `frozenset` | 数组 | 快照 |
+| `dict` | 字典 | 快照 |
+| numpy 标量（`shape == ()`） | 数值 | 快照（`item()`） |
+| **`ndarray`** | **句柄**（`Python对象`） | 引用——保留 `.sum()` / `.reshape()` / `.dtype` 全部方法 |
+| `DataFrame` / `Series` / 模块 / 函数 / 类实例 | 句柄 | 引用 |
+
+`ndarray` 一律给句柄（第 32 轮修订）：把数组内联成 zuzo 数组虽然好看，但会丢掉全部方法，而「调库」的价值恰恰在方法。要原生数组就显式 `py取值(h)`：
+
+```zuzo
+变量 np = py导入("numpy")
+变量 a = py方法(np, "arange", 6)
+打印(py取值(a))                  // [0, 1, 2, 3, 4, 5]
+打印(py方法(py方法(a, "reshape", [2,3]), "tolist"))   // [[0, 1, 2], [3, 4, 5]]
+```
+
+### 5.3 句柄 vs 快照
+
+一句话：**句柄是引用，数组/字典是快照**。`py方法(df, "to_numpy")` 拿到的是句柄；`py取值(...)` 之后与远端对象再无关系。回写远端只能靠 `py设` / `py方法(..., "__setitem__", ...)`。
+
+---
+
+## 六、完整示例
+
+### 6.1 numpy：数组与方法链
+
+```zuzo
+变量 np = py导入("numpy")
+变量 a = py方法(np, "array", [[1, 2, 3], [4, 5, 6]])
+打印(py类型(a))                       // ndarray
+打印(py取(a, "shape"))                // [2, 3]
+打印(py方法(a, "sum"))                // 21
+打印(py方法(a, "mean"))               // 3.5
+打印(py方法(py方法(a, "reshape", [3, 2]), "tolist"))   // [[1, 2], [3, 4], [5, 6]]
+打印(py取(py取(a, "dtype"), "name"))  // int64
+```
+
+### 6.2 pandas：构造 / 选列 / 聚合 / 增列
+
+```zuzo
+变量 pd = py导入("pandas")
+变量 df = py调(py取(pd, "DataFrame"), {"a": [1,2,3], "b": [10,20,30]})
+打印(py取(df, "shape"))                 // [3, 2]
+打印(py方法(py取值(df, "a"), "sum"))     // 6（py取值(df,"a") = df["a"]）
+打印(py方法(py方法(df, "sum"), "sum"))   // 66
+py方法(df, "__setitem__", "c", [7,7,7])
+打印(py取(df, "shape"))                 // [3, 3]
+打印(py取值(py方法(df, "to_dict", "records")))   // [{a:1,b:10,c:7}, ...]
+```
+
+### 6.3 requests：调已安装库（不联网也能验证属性链）
+
+```zuzo
+变量 requests = py导入("requests")
+打印(py取(requests, "__version__"))                    // 2.32.3
+打印(py取(py取(requests, "exceptions"), "RequestException"))  // <class 'requests.exceptions.RequestException'>
+```
+
+### 6.4 关键字参数
+
+```zuzo
+变量 json = py导入("json")
+变量 文本 = py调参(py取(json, "dumps"), [{"甲": 1}], {"ensure_ascii": 假, "indent": 2})
+打印(文本)
+```
+
+---
+
+## 七、错误处理
+
+| 错误码 | 含义 | 典型触发 | 处理 |
+|---|---|---|---|
+| `E910` | 桥启动失败 | 找不到 CPython / 握手失败 | 设 `ZUZO_PYTHON` |
+| `E911` | 参数错误 | `py调` 第一个参数不是句柄、参数个数不对 | 检查调用 |
+| `E912` | 远端异常 | Python 抛 `TypeError` / `ImportError`…（消息带 traceback） | 看 traceback 尾部 |
+| `E913` | 目标不是句柄 / 不可调用 | 对数组调用 `py方法` | 先 `py导入`/`py取`/`py方法` |
+| `E903` / `E904` | `py求值` / `py执行` 的错误（mix 桥口径） | 语法错误、远端异常 | 同上 |
+
+```zuzo
+执行 {
+    py求值("1/0")
+} 遇到 e {
+    打印(错误码(e))                       // E903
+    打印(包含(错误信息(e), "ZeroDivisionError"))   // 真
+}
+```
+
+远端异常一律转成 zuzo 错误对象，**不会让宿主崩溃**；报错后桥保持可用（实测 t12 用例）。
+
+---
+
+## 八、性能（本机实测）
+
+| 场景 | 数值 | 来源 |
+|---|---|---|
+| 单次往返（`py求值("1+1")`） | **134 µs/次** | `go test ./pyext -bench BenchmarkEval`（300 次均值） |
+| 已导入模块再 `py导入("numpy")` | **0.45 ms** | `BenchmarkImportNumpy` |
+| 冷启动（拉起 CPython + 握手） | **≈ 0.42 s** | `time ./zuzo.exe -e 'py模式("子进程")'` |
+| 10 万元素 numpy 求和 | 亚秒级，一次性 | `tests_bridge/t09_bigdata.hy` |
+
+口径：跨进程往返是**微秒级**，适合「大计算留在 Python、zuzo 只发指令」的用法；不要用它跑百万次小循环（那属于纯 Go 运行时的场景）。
+
+---
+
+## 九、边界
+
+1. **单向调用**：CPython 不能回调 `.hy` 函数（桥只传值，不传函数）。
+2. **快照语义**：数组/字典过桥即拷贝，改副本不影响远端；改远端必须 `py设` / `__setitem__`。
+3. **句柄不自动回收**：远端句柄表常驻到进程退出；长跑程序请对不再用的大对象 `py释放`。
+4. **`tmp/` 里的 `child.py`**：内嵌脚本按内容哈希落到 `%TEMP%/zuzo-pyext-<hash>/child.py`，升级 zuzo 后哈希变化会自动换新文件。
+5. **并发**：单管道串行（互斥锁），不是多线程并发桥；需要并发就在 Python 侧用线程/协程。
+6. **不做的**：不做双向对象共享、不做序列化兼容保证、不做跨机器。
+
+---
+
+## 十、验收命令
+
+```bash
+# 1) 桥单测（无 CPython 自动 Skip）
+CGO_ENABLED=1 CC="/c/Dev/zig/zig cc" go test ./pyext -count=1
+
+# 2) 端到端对拍（13 用例，期望值由 CPython 现算）
+./run_tests_bridge.sh
+# → BRIDGE PASS=13 FAIL=0
+
+# 3) 子进程服务端自检
+python pyext/child.py --selftest
+# → SELFTEST PASS 25
+
+# 4) 关掉桥，验回退语义
+ZUZO_PY_BRIDGE=0 ./zuzo.exe tests_bridge/t02_auto_fallback.hy   # 应报 C 扩展错误
+```

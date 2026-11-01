@@ -19,6 +19,7 @@ import (
 	"zuzo/mix"
 	"zuzo/object"
 	"zuzo/parser"
+	"zuzo/pyext"
 	pyrt "zuzo/py/runtime"
 )
 
@@ -95,6 +96,8 @@ func addUndefinedIssues(diag *diagnostic.Report, program *ast.Program, sev diagn
 func main() {
 	startCPUProfile()
 	initInterop()
+	// 第32轮：宿主退出时关掉 CPython 子进程（未启动则无操作）
+	defer pyext.Default().Close()
 	args := os.Args[1:]
 
 	if len(args) == 0 {

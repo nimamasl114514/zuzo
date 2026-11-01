@@ -26,6 +26,17 @@ func (i *Inferencer) builtinType(name string) (Type, bool) {
 		tv := i.newTypeVar()
 		return TypeFunc{Params: []Type{tv}, Return: TFloat}, true
 
+	// --- 真实 CPython 子进程桥（第32轮） ---
+	// 口径：全部按「任意参数、任意返回」放宽（返回值类型由远端决定，
+	// 静态期无法定死；参数个数由运行期内置函数自检报 E911/E913）。
+	case "py导入", "py取", "py设", "py调", "py方法", "py调参", "py取值", "py描述", "py类型", "py释放":
+		return TypeFunc{Params: []Type{TAny}, Return: TAny, Variadic: true}, true
+	case "py模式", "py有库", "py信息", "py安装":
+		return TypeFunc{Params: []Type{TAny}, Return: TAny, Variadic: true}, true
+	// mix 桥注入的旧名字（第32轮：子进程模式下也会降级）
+	case "py求值", "py执行", "py调用", "py获取", "py设置", "py存在":
+		return TypeFunc{Params: []Type{TAny}, Return: TAny, Variadic: true}, true
+
 	// --- 数组 ---
 	case "推入":
 		elemT := i.newTypeVar()

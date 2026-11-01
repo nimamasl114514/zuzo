@@ -23,6 +23,7 @@
 - **字符串标准库**：内建 `文本` 命名空间（110 成员：大小写 / 裁剪 / 查找替换 / 分割 / 对齐 / 判定 / 子串 / 中文友好 / UTF-8・编码・正则）+ `libs/strings` 高层封装（统计 / 表格 / 命名法 / 模板 / 千分位）
 - **工具链**：`zpm` 包管理器、类型检查 `--check`、拓扑指纹分析 `--analyze`、影子模式 `--shadow`、CPU 采样 `ZUZO_CPUPROFILE`
 - **LLVM 后端**：`--emit-llvm` 直接生成文本 LLVM IR、`--emit-exe` 走 clang 产出原生 exe；与解释器逐字节对拍（20/20），详见 [LLVM 后端](docs/llvm-backend.md)
+- **CPython 子进程桥**：`py导入("numpy")` 即可在 `.hy` 里直接用本机 Python 库（含 numpy / pandas 这类 C 扩展），句柄引用 + 容器快照，老代码 `py求值/py执行` 命中 `.pyd` 时自动降级并粘住子进程模式；详见 [Python 子进程桥](docs/python-bridge.md)
 
 ## 快速开始
 
@@ -126,6 +127,7 @@ go test ./...         # Go 单测（含原生循环、SAP、混合切块）
 - [性能模型与观测](docs/performance.md)
 - [LLVM 后端](docs/llvm-backend.md) · [运行时内存回收](docs/gc.md)
 - [CFFI](docs/cffi.md) · [WASM FFI](docs/wasm-ffi.md)
+- [Python 子进程桥（CPython）](docs/python-bridge.md) · [跨语言互操作](docs/interop.md)
 - [开发日志](交付-累计.md)
 
 ## 许可证

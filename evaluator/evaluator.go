@@ -1339,9 +1339,16 @@ func BuiltinNames() []string {
 		for _, ns := range builtinNamespaces {
 			builtinNameList = append(builtinNameList, ns)
 		}
+		// 跨语言桥在运行期注入的名字（mix.Bridge）也要被静态检查视为已定义
+		builtinNameList = append(builtinNameList, bridgeBuiltinNames...)
 		sort.Strings(builtinNameList)
 	}
 	return builtinNameList
+}
+
+// bridgeBuiltinNames 由 mix 桥在运行期注入的内置名（第32轮补：静态检查不再误报未定义）
+var bridgeBuiltinNames = []string{
+	"py求值", "py执行", "py调用", "py获取", "py设置", "py存在",
 }
 
 // builtinNamespaces 以「对象」形式注入的名称（静态检查同样视为已定义）
@@ -1361,6 +1368,23 @@ func registerBuiltins(env *object.Environment) {
 		"错误码":  builtinErrorCode,
 		"错误信息": builtinErrorMessage,
 		"错误行":  builtinErrorLine,
+
+		// --- 真实 CPython 子进程桥（builtins_pybridge.go · 第32轮） ---
+		// 让 .hy 直接调任意已安装 Python 库（含 numpy/pandas 这类 C 扩展）
+		"py导入": builtinPyImport,
+		"py取":  builtinPyGet,
+		"py设":  builtinPySet,
+		"py调":  builtinPyCall,
+		"py调参": builtinPyCallKw,
+		"py方法": builtinPyMethod,
+		"py取值": builtinPyNative,
+		"py描述": builtinPyRepr,
+		"py类型": builtinPyType,
+		"py释放": builtinPyRelease,
+		"py模式": builtinPyMode,
+		"py信息": builtinPyInfo,
+		"py有库": builtinPyHasModule,
+		"py安装": builtinPyInstall,
 
 		// --- 数组（builtins_array.go） ---
 		"推入": builtinPush,

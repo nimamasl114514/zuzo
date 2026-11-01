@@ -1,0 +1,11 @@
+// t05 pandas：DataFrame 构造、列选择、列求和、增列、整体求和
+// 期望（python -c 现算）：形状=(3, 2) a列和=6 总和=66 增列后形状=(3, 3)
+变量 pd = py导入("pandas")
+变量 df = py调(py取(pd, "DataFrame"), {"a": [1, 2, 3], "b": [10, 20, 30]})
+变量 形 = py取(df, "shape")
+变量 a列 = py方法(df, "__getitem__", "a")
+变量 a和 = py方法(a列, "sum")
+变量 总 = py方法(py方法(df, "sum"), "sum")
+py方法(df, "__setitem__", "c", [7, 7, 7])
+变量 形2 = py取(df, "shape")
+打印("[t05] 形状=", 形, " a列和=", a和, " 总和=", 总, " 增列后=", 形2)
