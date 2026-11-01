@@ -154,10 +154,95 @@ func WriteLLVM(srcPath, outPath string) (*ast.Program, error) {
 	return prog, nil
 }
 
-// FindClang 定位 clang：ZUZO_CLANG → PATH → 常见安装路径。
-func FindClang() (string, error) {
-	if v := strings.TrimSpace(os.Getenv("ZUZO_CLANG")); v != "" {
+// Compiler 描述一个 C/IR 编译器调用（clang 或 zig cc）
+type Compiler struct {
+	Exe    string   // 可执行文件
+	Prefix []string // 前置参数（zig cc 需要 "cc" 与 -target）
+	Name   string   // 展示名：clang / zig cc
+}
+
+// FindCompiler 按「ZUZO_CC → ZUZO_CLANG → clang → zig cc」解析编译器。
+// zig cc 自带 libc 与链接器，是「一台机器只装了 zuzo」时的兜底（第32轮）。
+func FindCompiler() (*Compiler, error) {
+	if v := strings.TrimSpace(os.Getenv("ZUZO_CC")); v != "" {
+		if strings.Contains(strings.ToLower(v), "zig") {
+			// 允许 "C:/path/zig.exe cc -target ..." 这种带参写法
+			fields := strings.Fields(v)
+			if len(fields) > 1 {
+				return &Compiler{Exe: filepath.ToSlash(fields[0]), Prefix: fields[1:], Name: "zig cc"}, nil
+			}
+			return zigCompiler(v)
+		}
+		fields := strings.Fields(v)
+		if len(fields) > 1 {
+			return &Compiler{Exe: fields[0], Prefix: fields[1:], Name: filepath.Base(fields[0])}, nil
+		}
+		return &Compiler{Exe: v, Name: filepath.Base(v)}, nil
+	}
+	if c, err := findClang(); err == nil {
+		return &Compiler{Exe: c, Name: "clang"}, nil
+	}
+	if zig, err := FindZig(); err == nil {
+		return zigCompiler(zig)
+	}
+	return nil, fmt.Errorf("未找到 C 编译器：装 LLVM/clang，或装 zig（zuzo toolchain install），或设置 ZUZO_CC")
+}
+
+// zigCompiler 组装 zig cc 调用（Windows 目标固定 msvc triple，与运行时 obj 一致）
+func zigCompiler(zig string) (*Compiler, error) {
+	// zig 自己按「可执行文件路径」推安装目录，反斜杠会让它解析失败 → 统一正斜杠
+	zig = filepath.ToSlash(zig)
+	prefix := []string{"cc"}
+	if runtime.GOOS == "windows" {
+		prefix = append(prefix, "-target", "x86_64-windows-msvc")
+	}
+	return &Compiler{Exe: zig, Prefix: prefix, Name: "zig cc"}, nil
+}
+
+// FindZig 定位 zig：ZUZO_ZIG → <zuzo 同级>/tools/zig → <zuzo 同级>/zig → PATH → 用户工具链目录
+func FindZig() (string, error) {
+	if v := strings.TrimSpace(os.Getenv("ZUZO_ZIG")); v != "" {
 		return v, nil
+	}
+	var candidates []string
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(dir, "tools", "zig", "zig"+exeSuffix()),
+			filepath.Join(dir, "tools", "zig", "zig.exe"),
+			filepath.Join(dir, "zig", "zig"+exeSuffix()),
+		)
+	}
+	if p, err := exec.LookPath("zig"); err == nil {
+		candidates = append(candidates, p)
+	}
+	if la := os.Getenv("LOCALAPPDATA"); la != "" {
+		candidates = append(candidates, filepath.Join(la, "zuzo", "toolchain", "zig", "zig.exe"))
+	}
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			if !zigComplete(c) {
+				return "", fmt.Errorf("zig 不完整（缺同级 lib/ 目录）：%s —— 请复制整个 zig 发行版目录，而不是只拷 zig.exe", c)
+			}
+			return filepath.ToSlash(c), nil
+		}
+	}
+	return "", fmt.Errorf("未找到 zig")
+}
+
+// zigComplete zig 必须有同级 lib/（标准库），否则运行期报 unable to find zig installation directory
+func zigComplete(zigExe string) bool {
+	st, err := os.Stat(filepath.Join(filepath.Dir(zigExe), "lib"))
+	return err == nil && st.IsDir()
+}
+
+// FindClang 定位 clang：ZUZO_CLANG → PATH → 常见安装路径。
+func findClang() (string, error) {
+	if v := strings.TrimSpace(os.Getenv("ZUZO_CLANG")); v != "" {
+		if st, err := os.Stat(v); err == nil && !st.IsDir() {
+			return v, nil
+		}
+		// 显式指定但不存在 → 继续找，找不到就交给 zig cc 兜底
 	}
 	if p, err := exec.LookPath("clang"); err == nil {
 		return p, nil
@@ -204,7 +289,7 @@ func BuildExe(srcPath, outExe string) (llPath string, exePath string, err error)
 	if v := strings.TrimSpace(os.Getenv("ZUZO_TARGET")); v != "" && v != hostTriple() {
 		return "", "", fmt.Errorf("跨平台目标 %q 只能生成 IR（--emit-llvm）；生成 exe 需要目标平台的 CRT 与链接器", v)
 	}
-	clang, err := FindClang()
+	cc, err := FindCompiler()
 	if err != nil {
 		return "", "", err
 	}
@@ -245,13 +330,20 @@ func BuildExe(srcPath, outExe string) (llPath string, exePath string, err error)
 	}
 
 	run := func(args ...string) ([]byte, error) {
-		cmd := exec.Command(clang, args...)
+		full := append(append([]string{}, cc.Prefix...), args...)
+		cmd := exec.Command(cc.Exe, full...)
 		cmd.Dir = work
 		return cmd.CombinedOutput()
 	}
 
 	mainObj := filepath.Join(work, "main.obj")
-	if out, err := run("-c", "-O2", "-Wno-override-module", "-x", "ir", llPath, "-o", mainObj); err != nil {
+	// zig cc 不认 "-x ir"（实测报 language not recognized），靠 .ll 扩展名识别即可
+	irArgs := []string{"-c", "-O2", "-Wno-override-module"}
+	if cc.Name != "zig cc" {
+		irArgs = append(irArgs, "-x", "ir")
+	}
+	irArgs = append(irArgs, llPath, "-o", mainObj)
+	if out, err := run(irArgs...); err != nil {
 		return llPath, absOut, fmt.Errorf("LLVM IR 编译失败：\n%s", string(out))
 	}
 	rtObj := filepath.Join(work, "zuzo_rt.obj")

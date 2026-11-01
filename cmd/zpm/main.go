@@ -54,6 +54,12 @@ func main() {
 		cmdShow(args)
 	case "init":
 		cmdInit(args)
+	case "doctor":
+		cmdDoctor(args)
+	case "build":
+		cmdBuild(args)
+	case "toolchain", "工具链":
+		cmdToolchain(args)
 	case "--help", "-h", "help":
 		printHelp()
 	case "--version", "-v":

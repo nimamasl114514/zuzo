@@ -20,6 +20,7 @@ import (
 	"zuzo/object"
 	"zuzo/parser"
 	"zuzo/pyext"
+	"zuzo/toolchain"
 	pyrt "zuzo/py/runtime"
 )
 
@@ -93,6 +94,52 @@ func addUndefinedIssues(diag *diagnostic.Report, program *ast.Program, sev diagn
 	return len(issues)
 }
 
+// runToolchain zuzo toolchain [status|install [路径]|env]
+func runToolchain(args []string) {
+	sub := "status"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "status", "状态":
+		r := toolchain.Status()
+		fmt.Printf("CC        : %s\n", r.CC)
+		if r.CCPath != "" {
+			fmt.Printf("CC 路径    : %s\n", r.CCPath)
+		}
+		if r.Zig != "" {
+			fmt.Printf("zig       : %s %s\n", r.Zig, r.ZigVer)
+		} else {
+			fmt.Println("zig       : 未找到（zuzo toolchain install 可安装）")
+		}
+		if r.Clang != "" {
+			fmt.Printf("clang     : %s\n", r.Clang)
+		} else {
+			fmt.Println("clang     : 未找到（不影响：有 zig cc 即可）")
+		}
+		fmt.Printf("用户工具链 : %s\n", r.Install)
+	case "install", "安装":
+		from := ""
+		if len(args) > 1 {
+			from = args[1]
+		}
+		dst, err := toolchain.Install(from)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "zuzo toolchain install: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("已安装 zig: %s\n", dst)
+		fmt.Println("提示：把 zig 放到 <zuzo.exe 同级>/tools/zig/ 下即视为「自带」，无需再安装。")
+	case "env", "环境":
+		for _, line := range toolchain.EnvLines() {
+			fmt.Println(line)
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "用法: zuzo toolchain [status|install [zig路径]|env]")
+		os.Exit(2)
+	}
+}
+
 func main() {
 	startCPUProfile()
 	initInterop()
@@ -103,6 +150,12 @@ func main() {
 	if len(args) == 0 {
 		// 启动 REPL
 		startREPL(os.Stdin, os.Stdout)
+		return
+	}
+
+	// 第32轮：`zuzo toolchain ...` —— 自带工具链（zig cc 兜底）的状态/安装/环境
+	if args[0] == "toolchain" || args[0] == "工具链" {
+		runToolchain(args[1:])
 		return
 	}
 

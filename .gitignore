@@ -69,3 +69,4 @@ fuzz/reports/work/
 
 # LLVM 后端基准产物（第31轮）
 bench/llvmbackend/_out/
+tools/zig/
