@@ -13,6 +13,9 @@ cd "$(dirname "$0")" || exit 1
 # 本地也要一致：统一 UTF-8 输出，不靠机器环境碰运气。
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
+# CPython 在管道下 stdout 是块缓冲、stderr 是无缓冲，logging 行会跑到前面；
+# 强制无缓冲，保证与 zuzo（Go 直写）的 stdout/stderr 交错顺序一致（t17 依赖这一点）。
+export PYTHONUNBUFFERED=1
 
 # _tmp 是用例的工作目录（t17_stdlib2 等依赖它存在；干净检出时没有）
 mkdir -p tests_py/_out tests_py/_tmp
