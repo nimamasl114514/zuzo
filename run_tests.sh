@@ -8,7 +8,14 @@
 #
 # 退出码：0 = 两轮全过；非 0 = 有差异
 cd "$(dirname "$0")" || exit 1
-mkdir -p tests_py/_out
+
+# CI（windows-latest）默认控制台编码是 cp1252，CPython 打印中文会 UnicodeEncodeError；
+# 本地也要一致：统一 UTF-8 输出，不靠机器环境碰运气。
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
+
+# _tmp 是用例的工作目录（t17_stdlib2 等依赖它存在；干净检出时没有）
+mkdir -p tests_py/_out tests_py/_tmp
 pass=0; fail=0; failed=""
 for f in tests_py/t*.py; do
   b=$(basename "$f" .py)
