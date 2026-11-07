@@ -44,7 +44,8 @@ zuzo 当前是一个**单二进制交付的脚本/服务端运行时**：能用�
 | 11 | **性能敏感的热点计算** | 五层执行栈（Tree-Walk → SAP 闭包熔合 → 原生 int64 → Smi → De Bruijn） | README 基准（同机 1e6 整数循环中位数）：zuzo SAP 23.6 ms / 内嵌 Python 21.1 ms / CPython 3.12 165.3 ms | ✅ 声明值，本轮未复跑 |
 | 12 | **GUI 桌面程序** | 无窗口/控件/绘图库；`打开浏览器` 是驱动外部 Chromium，不是自绘 | 内置表 175 项中无任何 GUI 类函数 | ❌ 不支持 |
 | 13 | **需要 sqlite3 / ssl / http.server / multiprocessing 的程序** | 标准库未实现这四个模块 | `modscan.py`：四项均 `ModuleNotFoundError` | ❌ 不支持 |
-| 14 | **依赖 CPython C 扩展的库（numpy/pandas）** | ✅ 走 pyext 子进程桥（第32轮）：`py导入 / py调 / py方法 / py取值` 在外部 CPython 子进程里执行，`.pyd` 由 CPython 自己加载，绕开 zuzo 侧 ABI 边界 | `pyext/child.py` + `pyext/client.go`（JSON Lines over stdio）；命令口径见 §2.1（输出待回填） | ✅ 走 pyext 子进程桥（第32轮） |
+| 14 | **依赖 CPython C 扩展的库（numpy/pandas）** | ✅ 走 pyext 子进程桥（第32轮 + 第33轮加固）：`py导入 / py调 / py方法 / py取值` 在外部 CPython 子进程里执行，`.pyd` 由 CPython 自己加载，绕开 zuzo 侧 ABI 边界；**连接池 `ZUZO_PY_POOL`**、**句柄 LRU `ZUZO_PY_MAX_HANDLES`**、**`py取值(df, "records+index")` 保留索引** | `./zuzo.exe -e '变量 pd = py导入("pandas"); 变量 df = pd.DataFrame({"城市": ["北京","上海","上海"], "销量": [3,5,2]}); 打印(py取值(df.groupby("城市").sum().reset_index(), "records+index"))'` → `{索引: [0, 1], 记录: [{城市: 上海, 销量: 7}, {城市: 北京, 销量: 3}]}`；`go test ./pyext -run TestPoolParallelSpeedup` → 单 worker 71.96ms / 双 worker 37.42ms = **1.92×** | ✅ 走 pyext 子进程桥（第32轮 / 第33轮加固） |
+| 16 | **长跑程序的内存观测** | 语言级 `GC统计()`（第33轮）→ 哈希 `{live, total, collections, objects}` | `./zuzo.exe -e '打印(GC统计())'` → `{live: 198, total: 3883, collections: 0, objects: 3238}`；长循环前后 `live` 不随循环次数线性涨 | ✅ |
 | 15 | **以 `.wasm` 模块为核心的插件程序** | WASM FFI 8 内置（wazero），能力齐 | 仓库无 `.wasm` 产物（`find . -name "*.wasm"` 空，只有 `math.wat`） | ⚠️ 需自备 `.wasm`，本轮未实测 |
 
 ### 2.1 第三方 CPython 库（numpy / pandas / requests 等）

@@ -16,12 +16,16 @@ package toolchain
 //	zuzo toolchain env             打印可直接 source / set 的环境变量
 
 import (
+	"archive/zip"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Report 当前工具链状态
@@ -147,7 +151,11 @@ func Status() Report {
 
 // Install 把 zig 拷进用户工具链目录。
 // from 为空时依次尝试：同级 tools/zig → PATH → ZUZO_ZIG。
+// from 为 http(s) URL 时（第33轮 T33-l）：下载 .zip / .tar.xz → 解压 → 校验 lib/ → 落地。
 func Install(from string) (string, error) {
+	if isRemoteURL(from) {
+		return installFromURL(strings.TrimSpace(from))
+	}
 	src := from
 	if src == "" {
 		src = FindZig()
@@ -290,4 +298,261 @@ func Summary() string {
 		clang = "无"
 	}
 	return fmt.Sprintf("CC=%s · zig=%s · clang=%s", r.CC, zig, clang)
+}
+
+// ---------------------------------------------------------------------------
+// 第33轮 T33-l：从官方 URL 直接下载 zig
+//
+//	zuzo toolchain install https://ziglang.org/download/0.13.0/zig-windows-x86_64-0.13.0.zip
+//
+// 链路：下载到临时目录（带百分比进度）→ 按扩展名解压（.zip 用标准库，.tar.xz/.tar.gz 用系统 tar）
+//      → 找 zig 可执行文件 → zigComplete() 校验同级 lib/（第32轮踩过「只拷 zig.exe 不行」）
+//      → installDirCopy() 落到 %LOCALAPPDATA%\zuzo\toolchain\zig → 落地后再校验一次。
+// 只依赖标准库；Windows 上解 .tar.xz 需要系统自带 tar（Win10 1803+ 的 bsdtar），没有就明确要求下 .zip。
+// ---------------------------------------------------------------------------
+
+// isRemoteURL 判断 from 是不是 http(s) 地址
+func isRemoteURL(s string) bool {
+	l := strings.ToLower(strings.TrimSpace(s))
+	return strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://")
+}
+
+// installFromURL 从 URL 下载并安装 zig，返回落地后的 zig 可执行文件路径
+func installFromURL(url string) (string, error) {
+	tmpDir, err := os.MkdirTemp("", "zuzo-zig-*")
+	if err != nil {
+		return "", fmt.Errorf("创建临时目录失败：%v —— 请检查 TEMP 目录权限", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	fmt.Fprintf(os.Stderr, "下载 zig: %s\n", url)
+	archive, err := download(url, tmpDir)
+	if err != nil {
+		return "", err
+	}
+
+	extractDir := filepath.Join(tmpDir, "unpack")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		return "", fmt.Errorf("创建解压目录失败：%v", err)
+	}
+	fmt.Fprintf(os.Stderr, "解压中: %s\n", filepath.Base(archive))
+	name := strings.ToLower(filepath.Base(archive))
+	switch {
+	case strings.HasSuffix(name, ".zip"):
+		err = unzipTo(archive, extractDir)
+	case strings.HasSuffix(name, ".tar.xz"), strings.HasSuffix(name, ".txz"),
+		strings.HasSuffix(name, ".tar.gz"), strings.HasSuffix(name, ".tgz"),
+		strings.HasSuffix(name, ".tar"):
+		err = untarTo(archive, extractDir)
+	default:
+		return "", fmt.Errorf("不支持的压缩格式：%s —— 请下载 .zip（https://ziglang.org/download/）", filepath.Base(archive))
+	}
+	if err != nil {
+		return "", err
+	}
+
+	zigExe, root := findZigRoot(extractDir)
+	if zigExe == "" {
+		return "", fmt.Errorf("压缩包里没找到 zig%s —— 请确认下载的是 zig 发行版（https://ziglang.org/download/）", exeSuffix())
+	}
+	if !zigComplete(zigExe) {
+		return "", fmt.Errorf("下载的 zig 不完整（%s 同级缺 lib/）—— 请下载完整发行版（不要只下 zig%s）",
+			zigExe, exeSuffix())
+	}
+
+	fmt.Fprintf(os.Stderr, "校验通过，安装到: %s\n", InstallDir())
+	dst, err := installDirCopy(root)
+	if err != nil {
+		return "", fmt.Errorf("复制到用户工具链目录失败：%v —— 请检查 %s 的写权限（或用 ZUZO_ZIG 指向现成 zig）", err, InstallDir())
+	}
+	// 落地后再校验一次：防止复制中途丢文件
+	if !zigComplete(dst) {
+		return "", fmt.Errorf("安装后校验失败：%s 同级缺 lib/ —— 请重试，或手动复制整个 zig 目录到 %s", dst, InstallDir())
+	}
+	return dst, nil
+}
+
+// download 把 url 下载到 dir，返回本地文件路径；期间向 stderr 打百分比
+func download(url, dir string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("下载地址非法：%s —— %v", url, err)
+	}
+	req.Header.Set("User-Agent", "zuzo-toolchain/1.0")
+	client := &http.Client{Timeout: 30 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("下载失败：%v —— 请检查网络/代理，或先手动下载 zip 再执行 zuzo toolchain install <本地 zip 路径>", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("下载失败：HTTP %d %s —— 地址可能已失效，请到 https://ziglang.org/download/ 取最新链接", resp.StatusCode, resp.Status)
+	}
+
+	base := filepath.Base(strings.Split(url, "?")[0])
+	if base == "" || base == "." || base == "/" || base == "\\" {
+		base = "zig-download.zip"
+	}
+	path := filepath.Join(dir, base)
+	f, err := os.Create(path)
+	if err != nil {
+		return "", fmt.Errorf("创建临时文件失败：%v", err)
+	}
+	pw := &progressWriter{total: resp.ContentLength, lastPct: -1}
+	if _, err := io.Copy(f, io.TeeReader(resp.Body, pw)); err != nil {
+		f.Close()
+		fmt.Fprintln(os.Stderr)
+		return "", fmt.Errorf("下载中断：%v —— 请重试", err)
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("写入临时文件失败：%v", err)
+	}
+	fmt.Fprintf(os.Stderr, "\r下载完成 %s（%s）%s\n", base, humanSize(pw.done), strings.Repeat(" ", 24))
+	return path, nil
+}
+
+// progressWriter 统计已下载字节并每 5% 打一次进度
+type progressWriter struct {
+	total   int64
+	done    int64
+	lastPct int   // 上次打印的百分比，-1 表示还没打过
+	lastMil int64 // 总长未知时，每 4MB 打一次
+}
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	n := len(b)
+	p.done += int64(n)
+	if p.total > 0 {
+		pct := int(p.done * 100 / p.total)
+		if pct >= p.lastPct+5 || pct == 100 {
+			p.lastPct = pct
+			fmt.Fprintf(os.Stderr, "\r下载中 %3d%%  %s / %s", pct, humanSize(p.done), humanSize(p.total))
+		}
+	} else if p.done-p.lastMil >= 4<<20 {
+		p.lastMil = p.done
+		fmt.Fprintf(os.Stderr, "\r下载中 %s", humanSize(p.done))
+	}
+	return n, nil
+}
+
+func humanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// safeJoin 解压目标路径，拒绝 zip slip（../ 穿越）
+func safeJoin(base, name string) (string, error) {
+	target := filepath.Join(base, filepath.FromSlash(name))
+	rel, err := filepath.Rel(base, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("压缩包内含非法路径：%s", name)
+	}
+	return target, nil
+}
+
+// unzipTo 用标准库解压 zip
+func unzipTo(archive, dstDir string) error {
+	zr, err := zip.OpenReader(archive)
+	if err != nil {
+		return fmt.Errorf("解压失败（不是有效 zip？）：%v", err)
+	}
+	defer zr.Close()
+	for _, fld := range zr.File {
+		target, err := safeJoin(dstDir, fld.Name)
+		if err != nil {
+			return err
+		}
+		if fld.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		rc, err := fld.Open()
+		if err != nil {
+			return fmt.Errorf("读取压缩包条目失败（%s）：%v —— 压缩包可能已损坏，请重新下载", fld.Name, err)
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		if err != nil {
+			rc.Close()
+			return err
+		}
+		_, cerr := io.Copy(out, rc)
+		rc.Close()
+		if err := out.Close(); err != nil && cerr == nil {
+			cerr = err
+		}
+		if cerr != nil {
+			return fmt.Errorf("解压 %s 失败：%v", fld.Name, cerr)
+		}
+	}
+	return nil
+}
+
+// untarTo 调系统 tar 解压 .tar.xz/.tar.gz（标准库没有 xz）
+func untarTo(archive, dstDir string) error {
+	tarPath, err := exec.LookPath("tar")
+	if err != nil {
+		if runtime.GOOS == "windows" {
+			return fmt.Errorf("当前系统没有 tar，无法解压 %s —— Windows 请改用 .zip 包（https://ziglang.org/download/ 选 windows-x86_64 的 .zip）",
+				filepath.Base(archive))
+		}
+		return fmt.Errorf("找不到 tar 命令，无法解压 %s —— 请安装 tar 后重试", filepath.Base(archive))
+	}
+	// 注意：GNU tar 会把 `C:\...` 当成「远程主机:路径」，必须切到压缩包所在目录用相对路径调用
+	workDir := filepath.Dir(archive)
+	args := []string{"-xf", filepath.Base(archive)}
+	if rel, rerr := filepath.Rel(workDir, dstDir); rerr == nil && rel != "" && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel) {
+		args = append(args, "-C", rel)
+	} else {
+		args = append(args, "-C", dstDir)
+	}
+	cmd := exec.Command(tarPath, args...)
+	cmd.Dir = workDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("解压失败（%s）：%s —— 压缩包可能损坏，请重新下载", filepath.Base(archive), msg)
+	}
+	return nil
+}
+
+// findZigRoot 在解压目录里找 zig 可执行文件，返回 (zig 路径, 该 zig 所在目录)
+// 优先返回同级带 lib/ 的那个（发行版可能平铺多层目录）。
+func findZigRoot(dir string) (zigExe, root string) {
+	var first string
+	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		base := strings.ToLower(info.Name())
+		if base != "zig" && base != "zig.exe" {
+			return nil
+		}
+		if first == "" {
+			first = p
+		}
+		if zigComplete(p) {
+			zigExe, root = p, filepath.Dir(p)
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if zigExe == "" && first != "" {
+		return first, filepath.Dir(first)
+	}
+	return zigExe, root
 }

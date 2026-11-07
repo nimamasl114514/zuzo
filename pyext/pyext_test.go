@@ -9,7 +9,10 @@ package pyext
 
 import (
 	"encoding/json"
+	"strconv"
+	"sync"
 	"testing"
+	"time"
 
 	"zuzo/object"
 )
@@ -233,4 +236,307 @@ func BenchmarkImportNumpy(b *testing.B) {
 			b.Skipf("无 numpy: %v", err)
 		}
 	}
+}
+
+// ==================== 第33轮：多子进程连接池（ZUZO_PY_POOL） ====================
+//
+// 句柄路由契约：id = workerIdx<<48 | localId
+//   - 默认 pool=1 时 workerIdx 恒为 0，id 与第32轮完全一致（兼容）；
+//   - pool>1 时 import 轮询分配，后续 get/set/call/repr/native/release 按高 16 位回到原 worker；
+//   - globals 类 op（eval/exec/getglobal/setglobal/has/hello）固定 worker 0。
+
+// newPoolClient 起一个 N worker 的桥（无 CPython 时 Skip）
+func newPoolClient(t *testing.T, n int) *Client {
+	t.Helper()
+	t.Setenv("ZUZO_PY_POOL", strconv.Itoa(n))
+	c := newTestClient(t)
+	if c.PoolSize() != n {
+		t.Fatalf("PoolSize = %d，期望 %d", c.PoolSize(), n)
+	}
+	return c
+}
+
+func TestPoolDefaultSingleWorkerCompatible(t *testing.T) {
+	// 默认（未设置 ZUZO_PY_POOL）= 1 个 worker，且句柄 id 高 16 位必须为 0
+	t.Setenv("ZUZO_PY_POOL", "")
+	c := newTestClient(t)
+	if c.PoolSize() != 1 {
+		t.Fatalf("默认 PoolSize = %d，期望 1", c.PoolSize())
+	}
+	mod, err := c.Import("json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := mod.(*object.PyObj)
+	if !ok {
+		t.Fatalf("import 未返回句柄: %#v", mod)
+	}
+	if idx := int(p.ID >> 48); idx != 0 {
+		t.Fatalf("pool=1 时句柄 #%d 的 worker 位 = %d，期望 0（必须与第32轮 id 完全一致）", p.ID, idx)
+	}
+}
+
+func TestPoolHandleRouting(t *testing.T) {
+	c := newPoolClient(t, 4)
+
+	handles := make([]*object.PyObj, 4)
+	for i := range handles {
+		mod, err := c.Import("json")
+		if err != nil {
+			t.Fatalf("第 %d 次 import: %v", i, err)
+		}
+		p, ok := mod.(*object.PyObj)
+		if !ok {
+			t.Fatalf("import 未返回句柄: %#v", mod)
+		}
+		if got := int(p.ID >> 48); got != i {
+			t.Fatalf("第 %d 次 import 落在 worker %d（句柄 #%d），期望轮询到 %d", i, got, p.ID, i)
+		}
+		handles[i] = p
+	}
+
+	// 每个 worker 上的句柄都必须能正常 get → call
+	for i, m := range handles {
+		fn, err := c.GetAttr(m, "dumps")
+		if err != nil {
+			t.Fatalf("worker %d getattr: %v", i, err)
+		}
+		f, ok := fn.(*object.PyObj)
+		if !ok || !f.Callable {
+			t.Fatalf("worker %d dumps 不是可调用句柄: %#v", i, fn)
+		}
+		arr := &object.Array{Elements: []object.Object{&object.Integer{Value: int64(i)}}}
+		out, err := c.Call(f, []object.Object{arr}, nil)
+		if err != nil {
+			t.Fatalf("worker %d call: %v", i, err)
+		}
+		if want := "[" + strconv.Itoa(i) + "]"; out.Inspect() != want {
+			t.Fatalf("worker %d json.dumps = %s，期望 %s", i, out.Inspect(), want)
+		}
+	}
+
+	// 释放后该 worker 上再取属性必须失败（句柄已从子进程句柄表摘除）
+	if err := c.Release(handles[2]); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if _, err := c.GetAttr(handles[2], "dumps"); err == nil {
+		t.Fatal("已释放的句柄不应再可用")
+	}
+	// 其他 worker 不受影响
+	if _, err := c.GetAttr(handles[3], "dumps"); err != nil {
+		t.Fatalf("worker 3 被误伤: %v", err)
+	}
+}
+
+func TestPoolCrossWorkerHandleRejected(t *testing.T) {
+	c := newPoolClient(t, 2)
+
+	m0, err := c.Import("json") // worker 0
+	if err != nil {
+		t.Fatal(err)
+	}
+	m1, err := c.Import("json") // worker 1
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn0, err := c.GetAttr(m0.(*object.PyObj), "dumps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 把 worker 1 的模块句柄当参数传给 worker 0 的调用：必须明确报错，不能把大 id 塞给子进程
+	_, err = c.Call(fn0.(*object.PyObj), []object.Object{m1}, nil)
+	if err == nil {
+		t.Fatal("跨 worker 句柄应当报错")
+	}
+	if !contains(err.Error(), "跨") {
+		t.Fatalf("错误信息应说明跨 worker 不通用，实际: %v", err)
+	}
+	// 同 worker 的句柄传参不受影响（json.dumps 对 module 抛 TypeError，说明确实送到了子进程）
+	_, err = c.Call(fn0.(*object.PyObj), []object.Object{m0}, nil)
+	if err == nil || !contains(err.Error(), "TypeError") {
+		t.Fatalf("同 worker 句柄应正常抵达子进程（TypeError），实际: %v", err)
+	}
+}
+
+func TestPoolWorkerRestartInvalidatesHandle(t *testing.T) {
+	c := newPoolClient(t, 2)
+
+	m, err := c.Import("os") // worker 0
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 杀掉主通道子进程（Exec 允许重启重试，第二次仍会自杀 → 报错）
+	if err := c.Exec("import os; os._exit(1)"); err == nil {
+		t.Fatal("杀进程应当报错")
+	}
+	// 重启后主通道可用
+	v, err := c.Eval("1+1")
+	if err != nil {
+		t.Fatalf("重启后求值失败: %v", err)
+	}
+	if v.Inspect() != "2" {
+		t.Fatalf("重启后 1+1 = %s", v.Inspect())
+	}
+	// 旧句柄必须失效（防 ABA）
+	if _, err := c.GetAttr(m.(*object.PyObj), "name"); err == nil || !contains(err.Error(), "失效") {
+		t.Fatalf("旧句柄应报失效，实际: %v", err)
+	}
+
+	// 另一 worker 不受影响：轮询到 worker 1 的 import 仍可正常使用
+	m1, err := c.Import("os")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1 := m1.(*object.PyObj)
+	if got := int(p1.ID >> 48); got != 1 {
+		t.Fatalf("重启后 import 落在 worker %d，期望轮询到 1", got)
+	}
+	if _, err := c.GetAttr(p1, "name"); err != nil {
+		t.Fatalf("worker 1 被误伤: %v", err)
+	}
+}
+
+// TestPoolParallelSpeedup 验收判据 3：ZUZO_PY_POOL=4 时双 goroutine 吞吐 ≥ 1.6× 单 worker。
+// 用「远端 sleep 2ms」做钟摆：Go 侧开销可忽略，ratio 直接反映两个子进程是否真并行。
+func TestPoolParallelSpeedup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short 跳过耗时并发基准")
+	}
+	c := newPoolClient(t, 4)
+
+	const iters = 30
+	const nap = 0.002
+
+	mkSleep := func() *object.PyObj {
+		mod, err := c.Import("time")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fn, err := c.GetAttr(mod.(*object.PyObj), "sleep")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fn.(*object.PyObj)
+	}
+	sleep0, sleep1 := mkSleep(), mkSleep() // worker 0 / worker 1
+	if int(sleep0.ID>>48) != 0 || int(sleep1.ID>>48) != 1 {
+		t.Fatalf("睡眠句柄未落在不同 worker: #%d / #%d", sleep0.ID, sleep1.ID)
+	}
+
+	one := func(fn *object.PyObj) error {
+		_, err := c.Call(fn, []object.Object{&object.Float{Value: nap}}, nil)
+		return err
+	}
+	serial := func() time.Duration {
+		st := time.Now()
+		for i := 0; i < iters; i++ {
+			if err := one(sleep0); err != nil {
+				t.Fatalf("serial sleep: %v", err)
+			}
+		}
+		return time.Since(st)
+	}
+	parallel := func() time.Duration {
+		st := time.Now()
+		var wg sync.WaitGroup
+		wg.Add(2)
+		run := func(fn *object.PyObj) {
+			defer wg.Done()
+			for i := 0; i < iters/2; i++ {
+				if err := one(fn); err != nil {
+					t.Errorf("parallel sleep: %v", err)
+					return
+				}
+			}
+		}
+		go run(sleep0)
+		go run(sleep1)
+		wg.Wait()
+		return time.Since(st)
+	}
+
+	// 各跑两轮取最好值，抵消调度抖动
+	s1, p1 := serial(), parallel()
+	s2, p2 := serial(), parallel()
+	if s2 < s1 {
+		s1 = s2
+	}
+	if p2 < p1 {
+		p1 = p2
+	}
+	ratio := float64(s1) / float64(p1)
+	t.Logf("单 worker %s / 双 worker %s = %.2f×", s1, p1, ratio)
+	if ratio < 1.6 {
+		t.Fatalf("双 goroutine 吞吐仅 %.2f×（< 1.6×），连接池未真正并行", ratio)
+	}
+}
+
+// BenchmarkEvalSerial 单 worker 往返吞吐（基线）
+func BenchmarkEvalSerial(b *testing.B) {
+	b.Setenv("ZUZO_PY_POOL", "1")
+	c := New()
+	c.SetNotice(nil)
+	if err := c.Start(); err != nil {
+		b.Skipf("无 CPython: %v", err)
+	}
+	defer c.Close()
+
+	mod, err := c.Import("json")
+	if err != nil {
+		b.Fatal(err)
+	}
+	fn, err := c.GetAttr(mod.(*object.PyObj), "dumps")
+	if err != nil {
+		b.Fatal(err)
+	}
+	dumps := fn.(*object.PyObj)
+	arg := &object.Array{Elements: []object.Object{
+		&object.Integer{Value: 1}, &object.String{Value: "x"}, &object.Boolean{Value: true},
+	}}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := c.Call(dumps, []object.Object{arg}, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkEvalParallel 4 worker + RunParallel（每个 goroutine 各自 import → 各自 worker）
+func BenchmarkEvalParallel(b *testing.B) {
+	b.Setenv("ZUZO_PY_POOL", "4")
+	c := New()
+	c.SetNotice(nil)
+	if err := c.Start(); err != nil {
+		b.Skipf("无 CPython: %v", err)
+	}
+	defer c.Close()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		mod, err := c.Import("json")
+		if err != nil {
+			b.Errorf("import: %v", err)
+			return
+		}
+		p, ok := mod.(*object.PyObj)
+		if !ok {
+			b.Errorf("import 未返回句柄: %#v", mod)
+			return
+		}
+		fn, err := c.GetAttr(p, "dumps")
+		if err != nil {
+			b.Errorf("getattr: %v", err)
+			return
+		}
+		dumps := fn.(*object.PyObj)
+		arg := &object.Array{Elements: []object.Object{
+			&object.Integer{Value: 1}, &object.String{Value: "x"}, &object.Boolean{Value: true},
+		}}
+		for pb.Next() {
+			if _, err := c.Call(dumps, []object.Object{arg}, nil); err != nil {
+				b.Errorf("call: %v", err)
+				return
+			}
+		}
+	})
 }

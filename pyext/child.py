@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import base64
 import builtins
+import collections
 import importlib
 import importlib.util
 import itertools
@@ -55,6 +56,7 @@ PROTO_VERSION = 1
 MAX_REPR = 200            # 契约：obj/call 的 repr 截前 200 字符
 MAX_TB = 8000             # 回溯上限，避免异常把 stdout 撑爆
 MAX_INLINE_ARRAY = 200000  # 契约：ndarray 内联阈值，超过走句柄
+DEFAULT_MAX_HANDLES = 10000  # 句柄表容量上限（LRU），可用 ZUZO_PY_MAX_HANDLES 覆盖
 
 # ---------------------------------------------------------------------------
 # stdio 隔离：先占住真实 stdout，再把 sys.stdout 换成 stderr
@@ -116,13 +118,47 @@ class ShutdownSignal(Exception):
 # 句柄表
 # ---------------------------------------------------------------------------
 
-_handles: dict[int, object] = {}
+# 句柄表：OrderedDict 维护「最近使用序」（队首最旧、队尾最新）。
+# 长跑程序反复 py导入 会不断注册新句柄，不设上限则远端对象永远存活 → 内存缓慢增长。
+# 因此超过 ZUZO_PY_MAX_HANDLES（默认 10000）时按 LRU 淘汰最旧：
+#   - 淘汰 = 从 _handles 里 pop → 引用计数归零 → 有 __del__ / 文件句柄的对象由 CPython 自然回收；
+#   - 被淘汰的 ID 再被 Go 侧引用得到 HandleError（与「子进程重启后旧句柄失效」同一语义）。
+_handles: "collections.OrderedDict[int, object]" = collections.OrderedDict()
 _ids = itertools.count(1)
+_evicted = 0  # 累计淘汰数（自检 / 观测用）
+
+def max_handles() -> int:
+    """当前句柄表容量上限：ZUZO_PY_MAX_HANDLES，非法 / 非正数回落默认值。"""
+    raw = os.environ.get("ZUZO_PY_MAX_HANDLES")
+    if raw is not None:
+        try:
+            n = int(str(raw).strip())
+            if n > 0:
+                return n
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_MAX_HANDLES
+
+def _evict_lru() -> None:
+    """超限时从队首（最久未使用）逐个淘汰。"""
+    global _evicted
+    limit = max_handles()
+    while len(_handles) > limit:
+        _handles.popitem(last=False)
+        _evicted += 1
+
+def _touch(hid: int) -> None:
+    """命中句柄 → 移到队尾（最近使用）。"""
+    try:
+        _handles.move_to_end(hid)
+    except KeyError:
+        pass
 
 
 def register(obj) -> int:
     hid = next(_ids)
     _handles[hid] = obj
+    _evict_lru()  # 新句柄即最近使用；超限时先淘汰最旧的
     return hid
 
 
@@ -156,9 +192,11 @@ def lookup(req: dict) -> object:
     if hid == 0:  # 0 = 常驻 globals（供 getglobal / setglobal / zuzo 侧 Lookup 使用）
         return GLOBALS
     try:
-        return _handles[hid]
+        obj = _handles[hid]
     except KeyError:
         raise HandleError("stale or unknown handle id %d" % hid)
+    _touch(hid)           # 每次命中刷新访问序，保证 LRU 淘汰的是真正最久未用的
+    return obj
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +468,44 @@ def to_native(v):
 
 
 # ---------------------------------------------------------------------------
+# native 的两种模式：records（默认，丢索引）/ records+index（索引 + 记录）
+# ---------------------------------------------------------------------------
+
+NATIVE_MODES = ("records", "records+index")
+
+def _records_with_index(v) -> dict:
+    """DataFrame → {"索引": [索引值...], "记录": [{列: 值}...]}（groupby 的城市索引不再丢）。
+
+    索引与记录都过 _plain，保证 JSON 可序列化（numpy 标量 / Timestamp 都压成原生值）。
+    """
+    if not (hasattr(v, "columns") and hasattr(v, "to_dict")):
+        raise ProtocolError("records+index 模式需要 DataFrame 类对象，得到 %s"
+                            % _type_name(v))
+    try:
+        raw = v.to_dict(orient="records")
+    except BaseException as e:
+        raise ProtocolError("records+index 取记录失败: %s: %s"
+                            % (type(e).__name__, e))
+    records = [_plain(r) for r in raw]
+    index = []
+    try:
+        for key in v.index:
+            index.append(_plain(key))
+    except BaseException as e:
+        raise ProtocolError("records+index 取索引失败: %s: %s"
+                            % (type(e).__name__, e))
+    return {"索引": index, "记录": records}
+
+def to_native_mode(v, mode=None):
+    """按 mode 转原生值：records（默认）/ records+index（索引 + 记录）。"""
+    if mode is None or mode == "" or mode == "records":
+        return to_native(v)
+    if mode == "records+index":
+        return _records_with_index(v)
+    raise ProtocolError("unknown native mode %r（可用：records / records+index）"
+                        % (mode,))
+
+# ---------------------------------------------------------------------------
 # 常驻 globals（eval / exec 共享）
 # ---------------------------------------------------------------------------
 
@@ -440,6 +516,10 @@ GLOBALS = {
     "__doc__": None,
     "__builtins__": builtins,
     "__package__": None,
+    # Go 侧 py取值(句柄, "records"/"records+index") 的通道：
+    # client.go 的 Native() 只有 id 形参（本轮禁改 client.go / proto.go），
+    # 因此 Go 侧把句柄放进 globals 槽，再 eval 调这个助手，与 op_native(mode=…) 同一实现。
+    "__pybridge_native__": to_native_mode,
 }
 
 
@@ -574,8 +654,9 @@ def op_repr(req):
 
 
 def op_native(req):
+    """native op：mode 缺省/"records" 同旧行为；"records+index" 额外返回索引。"""
     obj = lookup(req)
-    return enc(to_native(obj))
+    return enc(to_native_mode(obj, req.get("mode")))
 
 
 def op_release(req):
@@ -893,6 +974,86 @@ def _selftest() -> int:
     r = call("has", name="zzz_no_such_module_20261101")
     ok_has_no = out(r) == {"k": "bool", "v": False}
     check("has.spec", ok_has_json and ok_has_no, "")
+
+    # 20. native 的 records+index：DataFrame groupby 的索引不能丢（有 pandas 才测）
+    r = call("has", name="pandas")
+    if out(r).get("v") is True:
+        call("exec", code="import pandas as _pd")
+        call("exec", code=("_df_gi = _pd.DataFrame({'城市': ['北京','上海','上海'], "
+                             "'销量': [3, 5, 2]}).groupby('城市').sum()"))
+        r = call("eval", expr="_df_gi")
+        gi_handle = out(r).get("id")
+        # 默认（无 mode）/ "records"：旧行为，只有记录
+        r = call("native", hid=gi_handle)
+        # 注意：pandas groupby 默认 sort=True，索引按城市名字典序（上海 < 北京）
+        check("native.records_default", out(r) == {
+            "k": "list",
+            "v": [{"k": "dict", "v": [[{"k": "str", "v": "销量"},
+                                         {"k": "int", "v": "7"}]]},
+                  {"k": "dict", "v": [[{"k": "str", "v": "销量"},
+                                         {"k": "int", "v": "3"}]]}]}, str(r)[:300])
+        r = call("native", hid=gi_handle, mode="records+index")
+        v = out(r)
+        got = {}
+        ok_shape = v.get("k") == "dict" and isinstance(v.get("v"), list)
+        if ok_shape:
+            for pair in v["v"]:
+                got[dec(pair[0])] = dec(pair[1])
+        check("native.records_index",
+              ok_shape and [k for k in got] == ["索引", "记录"]
+              and got.get("索引") == ["上海", "北京"]
+              and got.get("记录") == [{"销量": 7}, {"销量": 3}], str(r)[:400])
+        # 未知 mode 要报 ProtocolError，不能静默降级
+        r = call("native", hid=gi_handle, mode="records+index+xx")
+        check("native.bad_mode", r.get("ok") is False
+              and (r.get("e") or {}).get("t") == "ProtocolError", str(r)[:200])
+        # Go 侧通道：globals 助手 __pybridge_native__（eval 路径）
+        r = call("eval", expr="__pybridge_native__(_df_gi, 'records+index')")
+        v = out(r)
+        got2 = {}
+        if isinstance(v.get("v"), list):
+            for pair in v["v"]:
+                got2[dec(pair[0])] = dec(pair[1])
+        check("native.eval_channel", got2.get("索引") == ["上海", "北京"]
+              and got2.get("记录") == [{"销量": 7}, {"销量": 3}], str(r)[:400])
+    else:
+        check("native.records_index", True, "pandas 未安装，跳过")
+        check("native.eval_channel", True, "pandas 未安装，跳过")
+
+    # 21. LRU：超限释放最旧句柄（ZUZO_PY_MAX_HANDLES=3 注册 5 个只剩 3 个）
+    _saved_limit = os.environ.get("ZUZO_PY_MAX_HANDLES")
+    _saved_handles = list(_handles.items())
+    os.environ["ZUZO_PY_MAX_HANDLES"] = "3"
+    _handles.clear()
+    lru_ids = [register(object()) for _ in range(5)]
+    ok_cap = (len(_handles) == 3 and list(_handles.keys()) == lru_ids[2:]
+              and _evicted >= 2)
+    stale_ok = False
+    try:
+        lookup({"hid": lru_ids[0]})
+    except HandleError:
+        stale_ok = True
+    check("lru.evict", ok_cap and stale_ok,
+          "len=%d ids=%r" % (len(_handles), list(_handles.keys())))
+
+    # 22. LRU：访问过的句柄变成最近使用，不会被下一次超限淘汰
+    _handles.clear()
+    a_id = register("a")
+    b_id = register("b")
+    c_id = register("c")
+    _ = lookup({"hid": a_id})   # 访问 a → a 变最新（b 成了最旧）
+    d_id = register("d")          # 超限 → 淘汰 b
+    check("lru.touch", list(_handles.keys()) == [c_id, a_id, d_id]
+          and b_id not in _handles and a_id in _handles,
+          "ids=%r" % (list(_handles.keys()),))
+
+    # 恢复现场（后面的 case 不再依赖句柄表）
+    _handles.clear()
+    _handles.update(_saved_handles)
+    if _saved_limit is None:
+        os.environ.pop("ZUZO_PY_MAX_HANDLES", None)
+    else:
+        os.environ["ZUZO_PY_MAX_HANDLES"] = _saved_limit
 
     # 输出
     passed = 0

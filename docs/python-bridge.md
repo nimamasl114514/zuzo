@@ -134,6 +134,8 @@ df["新列"] = [1, 1, 1]         // [3, 3]        —— 下标赋值（新增�
 | `ZUZO_PYTHON` | 解释器路径 | 覆盖自动探测（顺序：`ZUZO_PYTHON` → `python` → `python3` → 常见安装位置 → `py -3`） |
 | `ZUZO_PY_TIMEOUT` | 毫秒，默认 `120000` | 单次往返上限；超时杀子进程并在下次调用重启 |
 | `ZUZO_PY_BRIDGE_QUIET` | `1` | 不打印模式切换提示 |
+| `ZUZO_PY_POOL` | 整数，默认 `1`，上限 `32` | **连接池工作进程数**（第33轮）：`N>1` 时创建 N 个子进程，`py调/py方法/py取值` 等 op 按 round-robin 路由；每个 worker 独立 globals，句柄带 worker 前缀（跨 worker 句柄会被拒绝）。双 worker 实测 **1.92×** 加速 |
+| `ZUZO_PY_MAX_HANDLES` | 整数，默认 `10000` | **句柄表 LRU 上限**（第33轮）：超限时释放最久未用的句柄，避免长跑程序远端引用无限增长 |
 
 解释器探测会先跑 `-c "import sys;print(major.minor)"` 验证是 **CPython ≥ 3.8**；不满足的候选逐个跳过，错误里保留每个候选的失败原因。
 
@@ -169,7 +171,7 @@ py执行("import numpy as np")     // 第 1 步：纯 Go 运行时尝试 → 在
 | `py调` | `py调(可调用句柄, 参数...)` | 值 / 句柄 | `py调(py取(np,"sum"), [1,2,3])` |
 | `py调参` | `py调参(可调用句柄, 参数数组, 命名参数字典)` | 值 / 句柄 | `py调参(f, [1], {"timeout": 10})` |
 | `py方法` | `py方法(句柄, "方法名", 参数...)` | 值 / 句柄 | `py方法(df, "head", 5)` |
-| `py取值` | `py取值(句柄)` / `py取值(句柄, 键)` | 原生值 / 值 | `py取值(a)`（ndarray→嵌套数组）· `py取值(df,"a")`（取列） |
+| `py取值` | `py取值(句柄)` / `py取值(句柄, 键)` / `py取值(df, "records+index")` | 原生值 / 值 / 哈希 | `py取值(a)`（ndarray→嵌套数组）· `py取值(df,"a")`（取列）· `py取值(df,"records+index")` → `{索引: [...], 记录: [...]}`（保留 DataFrame 索引） |
 | `py描述` | `py描述(句柄)` | 字符串（repr） | `py描述(np)` |
 | `py类型` | `py类型(句柄)` | 字符串（远端类型名） | `py类型(a)` → `ndarray` |
 | `py释放` | `py释放(句柄)` | 空 | `py释放(df)` |
@@ -184,6 +186,8 @@ py执行("import numpy as np")     // 第 1 步：纯 Go 运行时尝试 → 在
 - **参数是变参**：`py调(f, 1, 2)` 就是 `f(1, 2)`；要传数组本身请直接写字面量 `py调(f, [1,2,3])`。
 - `py方法(x, "m", ...)` = `py调(py取(x, "m"), ...)`，省一次取属性。
 - `py取值(h)` 是「把远端对象拍平成原生值」：`ndarray→嵌套数组`、`DataFrame→records`、`Series→数组`、`set/tuple→数组`、`bytes→base64 文本`。
+- **`py取值(df, "records+index")`**（第33轮）保留 DataFrame 索引：返回 `{索引: [索引值...], 记录: [{列: 值}, ...]}`，解决 `groupby` 后索引丢失问题。代价：列名恰好叫 `records` / `records+index` 的取列需改用 `py方法(df, "__getitem__", "records")`。
+- **连接池**（第33轮）：`ZUZO_PY_POOL=4` 时四子进程轮询，适合 zuzo `并发` 同时打多个 Python 调用；同一组操作需在同一 worker 完成（跨 worker 句柄会被拒绝并返回 `E912`）。
 - `py有库` 与 `py安装` 是显式动作；桥**不会**在背后偷偷联网装包。
 
 ---

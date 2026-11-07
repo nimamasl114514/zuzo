@@ -100,8 +100,8 @@ func TestTargetOverride(t *testing.T) {
 
 // 5) 端到端冒烟：IR → clang → exe → 运行输出。
 func TestBuildExeSmoke(t *testing.T) {
-	if _, err := FindClang(); err != nil {
-		t.Skip("本机没有 clang，跳过 exe 冒烟")
+	if _, err := FindCompiler(); err != nil {
+		t.Skip("本机没有 clang/zig cc，跳过 exe 冒烟")
 	}
 	if runtime.GOOS != "windows" {
 		t.Skip("冒烟用例按 Windows 宿主编写")

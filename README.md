@@ -21,9 +21,10 @@
 - **混合语言 `.hypy`**：单文件内 `##ZUZO` / `##PY` 分块，两个运行时按名字双向同步变量
 - **内置能力**：HTTP 服务端、浏览器自动化（chromedp）、CFFI / WASM FFI（wazero）、并发原语、正则、编码、集合库
 - **字符串标准库**：内建 `文本` 命名空间（110 成员：大小写 / 裁剪 / 查找替换 / 分割 / 对齐 / 判定 / 子串 / 中文友好 / UTF-8・编码・正则）+ `libs/strings` 高层封装（统计 / 表格 / 命名法 / 模板 / 千分位）
-- **工具链**：`zpm` 包管理器（`zpm doctor` / `zpm build`）、**自带 zig cc**（`zuzo toolchain status\|install\|env`，`--emit-exe` 无 clang 也能编）、类型检查 `--check`、拓扑指纹分析 `--analyze`、影子模式 `--shadow`、CPU 采样 `ZUZO_CPUPROFILE`
+- **工具链**：`zpm` 包管理器（`zpm doctor` / `zpm build` / `zpm build --release` 产物体积降 38.7%）、**自带 zig cc**（`zuzo toolchain status\|install\|env`，`--emit-exe` 无 clang 也能编；`install` 支持本地目录或 **http(s) URL 直下**）、类型检查 `--check`、拓扑指纹分析 `--analyze`、影子模式 `--shadow`、CPU 采样 `ZUZO_CPUPROFILE`
 - **LLVM 后端**：`--emit-llvm` 直接生成文本 LLVM IR、`--emit-exe` 走 clang 产出原生 exe；与解释器逐字节对拍（20/20），详见 [LLVM 后端](docs/llvm-backend.md)
-- **CPython 子进程桥**：`导入 numpy` 之后**点号直调** `numpy.array([1,2,3]).sum()`（`zuzo pip install` 装包，装完即用；也支持 `导入 pandas 为 pd`）（含 numpy / pandas 这类 C 扩展），句柄引用 + 容器快照，老代码 `py求值/py执行` 命中 `.pyd` 时自动降级并粘住子进程模式；详见 [Python 子进程桥](docs/python-bridge.md)
+- **CPython 子进程桥**：`导入 numpy` 之后**点号直调** `numpy.array([1,2,3]).sum()`（`zuzo pip install` 装包，装完即用；也支持 `导入 pandas 为 pd`）（含 numpy / pandas 这类 C 扩展），句柄引用 + 容器快照，老代码 `py求值/py执行` 命中 `.pyd` 时自动降级并粘住子进程模式；**连接池 `ZUZO_PY_POOL=N`**（默认 1，双 worker 实测 1.92×）、**句柄 LRU 上限 `ZUZO_PY_MAX_HANDLES`**（默认 10000）、**`py取值(df, "records+index")` 保留 DataFrame 索引**；详见 [Python 子进程桥](docs/python-bridge.md)
+- **GC 观测**：语言级 `GC统计()` → `{live, total, collections, objects}`（长跑程序可观测对象存活，Live 不随循环次数线性涨）
 
 ## 快速开始
 
@@ -118,11 +119,11 @@ print(总)
 ./run_tests.sh        # Python 语义与 CPython 逐字节对拍（33 用例）
 ./run_tests_mix.sh    # 混合语言 golden（15 用例）
 ./run_tests_llvm.sh   # LLVM 后端对拍（20 用例）
-./run_tests_bridge.sh # CPython 子进程桥对拍（17 用例：numpy / pandas / requests / 错误 / 句柄）
+./run_tests_bridge.sh # CPython 子进程桥对拍（19 用例：numpy / pandas / requests / 错误 / 句柄 / 索引 / 点号）
 go test ./...         # Go 单测（含原生循环、SAP、混合切块）
 ```
 
-当前状态（2026-11-01 实测）：`run_tests` **33/33 通过**，且 `--shadow` 影子模式 **33/33 双轨一致**；`run_tests_mix` **15/15**；`run_tests_llvm` **20/20**·`run_tests_bridge` **17/17**；`projects/mini_scheme` 解释器与 LLVM 产物均 **31/31**；Go 单测覆盖 `ast` / `evaluator` / `fuzz` / `mix` / `tests`。
+当前状态（2026-11-01 实测）：`run_tests` **33/33 通过**，且 `--shadow` 影子模式 **33/33 双轨一致**；`run_tests_mix` **15/15**；`run_tests_llvm` **20/20**·`run_tests_bridge` **19/19**·`run_tests_toolchain` **6/6**；`projects/mini_scheme` 解释器与 LLVM 产物均 **31/31**；Go 单测 **10 包全绿**（`ast` / `diagnostic` / `evaluator` / `fuzz` / `infer` / `llvmbackend` / `mix` / `pyext` / `tests`）。
 
 ## 文档
 

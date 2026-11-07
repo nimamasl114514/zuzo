@@ -338,6 +338,17 @@ var unsupportedBuiltins = map[string]string{
 	"计时": "高精度计时", "计时秒": "高精度计时", "时间差": "时间运算",
 	"格式化时间": "时间格式化", "解析时间": "时间解析",
 	"读行": "标准输入",
+
+	// 真实 CPython 子进程桥（第32轮引入的 14 个 py* 内置）：
+	// 语义是「把对象送到外部 CPython 进程里求值」，依赖 pyext/ 的进程与握手协议，
+	// 无法降级成静态 LLVM IR，也没有等价的 native 符号，故在编译期明确拒绝。
+	"py导入": "CPython 子进程桥", "py取": "CPython 子进程桥",
+	"py设": "CPython 子进程桥", "py调": "CPython 子进程桥",
+	"py调参": "CPython 子进程桥", "py方法": "CPython 子进程桥",
+	"py取值": "CPython 子进程桥", "py描述": "CPython 子进程桥",
+	"py类型": "CPython 子进程桥", "py释放": "CPython 子进程桥",
+	"py模式": "CPython 子进程桥", "py信息": "CPython 子进程桥",
+	"py有库": "CPython 子进程桥", "py安装": "CPython 子进程桥",
 }
 
 // checkUnsupported 若调用了后端不支持的运行时，给出可读错误（沿用 C 后端文案与行列号口径）

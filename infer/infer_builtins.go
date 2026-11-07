@@ -367,6 +367,11 @@ func (i *Inferencer) builtinType(name string) (Type, bool) {
 	case "运行测试":
 		return TypeFunc{Params: []Type{}, Return: TBool}, true
 
+	// --- GC 观测（第33轮 T33-b） ---
+	case "GC统计":
+		// GC统计() → 哈希{live, total, collections, objects}
+		return TypeFunc{Params: []Type{}, Return: THash}, true
+
 	// --- C 库 FFI ---
 	case "加载C库":
 		return TypeFunc{Params: []Type{TStr}, Return: TAny}, true

@@ -37,6 +37,7 @@ zig
 zuzo toolchain status          # 当前用谁（CC / zig 版本 / clang / 工具链目录）
 zuzo toolchain env             # 打印 CGO_ENABLED / CC，可直接 source 或 set
 zuzo toolchain install [目录]  # 把整个 zig 发行版装到用户工具链目录
+zuzo toolchain install <URL>   # 从官方 .zip / .tar.xz 直下并解压校验后落地（第33轮）
 zuzo toolchain                 # 等价 status
 
 zuzo --emit-exe 主程序.hy -o app.exe    # 走上面解析出的 CC（clang 或 zig cc）
@@ -64,7 +65,8 @@ $ ZUZO_CC="D:\...\tools\zig\zig.exe" ./zuzo.exe --emit-exe tests_llvm/t01_print.
 2. **Windows 目标要钉 triple**：`zig cc -target x86_64-windows-msvc`，否则 zig 默认 gnu，与运行期 `zuzo_rt.obj` 的 ABI 不一致（IR 模块头是 msvc）。
 3. **路径必须正斜杠**：zig 用 `argv[0]` 推安装目录，反斜杠 Windows 路径会被它解析失败；Go 侧统一 `filepath.ToSlash`。
 4. **自带 ≠ 只拷 exe**：`lib/` 必须一起带上（本仓库 `tools/zig/` 已含完整发行版，约 381MB，`.gitignore` 忽略不入库）。
-5. **cgo 也要它**：`go build` 需要 C 编译器时用
+5. **URL 下载要校验 `lib/`**：`toolchain install https://ziglang.org/download/0.16.0/zig-windows-x86_64-0.16.0.zip` 下载后解压 → `findZigRoot` 定位 zig.exe → `zigComplete()` 校验同级 `lib/` → 复制落地；**只下 zig.exe 不完整**会被明确拒绝（第32轮踩过的坑）。安全防护：zip 解压带 zip-slip 检查（拒 `..` / 绝对路径），临时目录 `defer os.RemoveAll`。
+6. **cgo 也要它**：`go build` 需要 C 编译器时用
    ```bash
    CGO_ENABLED=1 CC="$(./zuzo.exe toolchain status | awk -F': ' '/^zig/{print $2}' | awk '{print $1}') cc -target x86_64-windows-msvc" go build -o zuzo.exe ./
    ```

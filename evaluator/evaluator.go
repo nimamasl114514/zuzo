@@ -1594,11 +1594,17 @@ func registerBuiltins(env *object.Environment) {
 		"WASM内存大小": builtinWasmMemSize,
 		"WASM关闭":   builtinWasmClose,
 
+		// --- GC 观测（builtins_gc.go · 第33轮 T33-b） ---
+		"GC统计": builtinGCStats,
+
 		// --- C 库 FFI（builtins_cffi.go） ---
 		"加载C库":  builtinLoadCLib,
 		"C函数声明": builtinCFuncDecl,
 		"C调用":   builtinCCall,
 	}
+
+	// GC 观测：记录根环境引用（GC统计() 据此统计存活变量数）
+	gcRootEnv = env
 
 	// 首次调用时初始化全局 Builtin 池（仅执行一次）
 	object.InitBuiltinPool(builtins)

@@ -218,9 +218,53 @@ func builtinPyCallKw(args ...object.Object) object.Object {
 
 // ==================== py取值 / py描述 / py释放 ====================
 
+// py取值 的 native 模式（第二参数是这两个字符串时，不再当「键」用，而是转原生值的模式）
+//
+//	records        默认行为：DataFrame → [{列: 值}, ...]，索引丢弃
+//	records+index  第33轮新增：→ {索引: [索引值...], 记录: [{列: 值}, ...]}
+//
+// 语义优先级：字符串且命中模式名 → 当模式；其余任何值 → 保持旧的 obj[键] 下标语义。
+// 代价：列名恰好叫 "records" / "records+index" 的 DataFrame 取列需改用 py方法(df, "__getitem__", "records")。
+const (
+	pyNativeModeRecords      = "records"
+	pyNativeModeRecordsIndex = "records+index"
+
+	// Go 侧到 child.py 的通道：client.go 的 Native() 只有 id 形参（本轮禁改 client.go/proto.go），
+	// 所以把句柄放进子进程 globals 槽，再 eval 调 child.py 的 __pybridge_native__，
+	// 它和 op_native(mode=…) 是同一份实现（单一真相源）。
+	pyNativeSlot   = "__zuzo_py_native_target__"
+	pyNativeHelper = "__pybridge_native__"
+)
+
+// pyNativeWithMode 把远端对象按指定模式转成 zuzo 原生值。
+func pyNativeWithMode(o object.Object, mode string) object.Object {
+	target, ok := asPyObj(o)
+	if !ok {
+		// 已经是原生值：幂等返回（与单参形式一致）
+		return o
+	}
+	b := pyBridge()
+	if err := b.SetName(pyNativeSlot, target); err != nil {
+		return pyErr("E912", "%v", err)
+	}
+	// 双引号包住的模式名是安全的 Python 字符串字面量（常量，无注入面）
+	v, err := b.Eval(fmt.Sprintf("%s(%s, %q)", pyNativeHelper, pyNativeSlot, mode))
+	if err != nil {
+		return pyErr("E912", "%v", err)
+	}
+	return v
+}
+
 // py取值(句柄) → 任意 — 把远端对象尽力转成 zuzo 原生（ndarray→数组、DataFrame→记录数组）
 func builtinPyNative(args ...object.Object) object.Object {
 	if len(args) == 2 {
+		// 两参且第二参数是模式名：透传到 child.py 的 native op（records / records+index）
+		if s, ok := args[1].(*object.String); ok {
+			switch s.Value {
+			case pyNativeModeRecords, pyNativeModeRecordsIndex:
+				return pyNativeWithMode(args[0], s.Value)
+			}
+		}
 		// 两参形式：py取值(对象, 键) = obj[键]（DataFrame 取列 / dict 取值）
 		target, ok := asPyObj(args[0])
 		if !ok {
