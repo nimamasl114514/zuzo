@@ -33,7 +33,7 @@
 2. **gopapy 前端四个已知坑**（详见 `docs/python-parser.md`）：转义半解码、超长整数报错、`except*`、推导式首子句 `async for` —— 已用「源码特征守卫 + 整文件回退」兜住，不影响正确性，只影响那类文件的解析速度。
 3. **GUI 自绘缺失**：无窗口 / 控件 / 绘图库；`打开浏览器()` 是驱动外部 Chromium（chromedp），不是 GUI 框架。
 4. **Linux / macOS 移植未完成**：CFFI 加载路径与浏览器内置依赖 Windows API，CI 目前跑 `windows-latest`。
-5. **`GC统计().live` 是近似值（解释器侧）**：口径为「根环境链上的变量数」，不是真正的堆对象可达集合；用于观察长跑程序是否线性增长足够，但不能当作精确 GC 统计。LLVM AOT 产物侧已是**两代分代 mark-sweep**（第 35 轮：minor/major + 晋升 + epoch 标记），`ZUZO_GC_TRACE=1` 可看每轮回收明细。
+5. **解释器侧 GC 统计口径（第 36 轮已补可达统计）**：`GC统计()` 现有六个字段——`live`（根环境链变量数）、`total` / `collections` / `objects`（Go runtime 口径）、`reachable` / `reach_bytes`（从根环境沿对象图遍历的语言级可达对象数与估算字节，去重防环）。判「语言级对象图是否泄漏」看 `reachable`；判「Go 进程堆是否受控」看 `objects`。`live` 与 `reach_bytes` 仍是近似口径（变量数 / 类型粗估），不是精确 malloc 账。LLVM AOT 产物侧是**两代分代 mark-sweep**（第 35 轮：minor/major + 晋升 + epoch 标记），`ZUZO_GC_TRACE=1` 可看每轮回收明细。
 
 ## 四、路线图（按 ROI）
 
@@ -44,6 +44,7 @@
 - [x] **P2** CPython 子进程桥：连接池 / 句柄 LRU / DataFrame 索引 / 模块亲和
 - [x] **P2** 工具链：自带 zig cc / URL 直下 / 发布档位（`--release=O0..Oz`）
 - [x] **P2** LLVM 后端两代分代 GC（第 35 轮：young/old 双链 + 晋升 + epoch 标记 + 双阈值自适应）
+- [x] **P2** 解释器侧可达对象统计（第 36 轮：`GC统计()` 增 `reachable` / `reach_bytes`，对象图遍历去重防环）
 - [ ] **P1** 大整数（消除 int64 溢出，向 CPython 语义靠拢）
 - [ ] **P2** `Environment` 存储收敛（store / slots / valueSlots / slotMap / context 五份状态合并为「槽位唯一 + map 视图」）
 - [ ] **P2** Linux / macOS 移植

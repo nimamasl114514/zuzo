@@ -35,7 +35,7 @@
 | **混合语言 `.hypy`** | 单文件 `##ZUZO` / `##PY` 分块，两个运行时按名字双向同步变量 |
 | **LLVM 后端** | `--emit-llvm` 出文本 IR、`--emit-exe` 出原生 exe；与解释器逐字节对拍；产物自带**两代分代 GC**（minor/major + 年龄晋升，`ZUZO_GC_TRACE` 可观测） |
 | **工具链** | `zpm` 包管理器（`doctor` / `build` / `build --release[=Oz]`）、自带 `zig cc`（`zuzo toolchain status\|install\|env`，支持本地目录或 URL 直下）、`--check` 类型检查、`--analyze` 拓扑分析、`--shadow` 影子模式 |
-| **测试与可观测** | `zuzo test` 用例运行器、`GC统计()`（live / total / collections / objects）、LLVM 产物 `ZUZO_GC_TRACE` 回收追踪、`ZUZO_CPUPROFILE` CPU 采样 |
+| **测试与可观测** | `zuzo test` 用例运行器、`GC统计()`（live / total / collections / objects / reachable / reach_bytes，含语言级对象图可达统计）、LLVM 产物 `ZUZO_GC_TRACE` 回收追踪、`ZUZO_CPUPROFILE` CPU 采样 |
 | **内置能力** | HTTP 服务端、浏览器自动化（chromedp）、CFFI / WASM FFI（wazero）、并发原语、正则、编码、集合库、`文本` 命名空间（110 成员） |
 
 > **平台**：当前主要在 **Windows x64** 开发与验证（CFFI 加载路径与浏览器内置依赖 Windows API）；Linux/macOS 移植见 [开发状态](docs/dev-status.md)。
