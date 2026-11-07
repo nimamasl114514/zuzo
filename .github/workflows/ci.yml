@@ -42,3 +42,7 @@ jobs:
       - name: 混合语言 golden
         shell: bash
         run: ./run_tests_mix.sh
+
+      - name: 语言用例（zuzo test）
+        shell: bash
+        run: ./zuzo.exe test examples/tests/ok_test.hy

@@ -242,7 +242,9 @@ func BenchmarkImportNumpy(b *testing.B) {
 //
 // 句柄路由契约：id = workerIdx<<48 | localId
 //   - 默认 pool=1 时 workerIdx 恒为 0，id 与第32轮完全一致（兼容）；
-//   - pool>1 时 import 轮询分配，后续 get/set/call/repr/native/release 按高 16 位回到原 worker；
+//   - pool>1 时 import 首次轮询分配，后续 get/set/call/repr/native/release 按高 16 位回到原 worker；
+//   - 第34轮模块亲和：同名模块固定在同一 worker（首次轮询 + 登记），因此只有「不同模块」才
+//     会散到不同 worker；同一模块重复 import 恒回原 worker（避免 numpy 被加载 N 份）；
 //   - globals 类 op（eval/exec/getglobal/setglobal/has/hello）固定 worker 0。
 
 // newPoolClient 起一个 N worker 的桥（无 CPython 时 Skip）
@@ -279,51 +281,81 @@ func TestPoolDefaultSingleWorkerCompatible(t *testing.T) {
 func TestPoolHandleRouting(t *testing.T) {
 	c := newPoolClient(t, 4)
 
+	// 第34轮：import 只在「新模块」上轮询；同名模块亲和，故用 4 个不同模块占满 4 个 worker。
+	modNames := []string{"json", "os", "time", "math"}
 	handles := make([]*object.PyObj, 4)
-	for i := range handles {
-		mod, err := c.Import("json")
+	for i, name := range modNames {
+		mod, err := c.Import(name)
 		if err != nil {
-			t.Fatalf("第 %d 次 import: %v", i, err)
+			t.Fatalf("第 %d 次 import %s: %v", i, name, err)
 		}
 		p, ok := mod.(*object.PyObj)
 		if !ok {
 			t.Fatalf("import 未返回句柄: %#v", mod)
 		}
 		if got := int(p.ID >> 48); got != i {
-			t.Fatalf("第 %d 次 import 落在 worker %d（句柄 #%d），期望轮询到 %d", i, got, p.ID, i)
+			t.Fatalf("第 %d 次 import %s 落在 worker %d（句柄 #%d），期望轮询到 %d", i, name, got, p.ID, i)
 		}
 		handles[i] = p
 	}
 
-	// 每个 worker 上的句柄都必须能正常 get → call
+	// 第二轮：同名模块必须回到原 worker（模块亲和），且不重复计数
+	for i, name := range modNames {
+		mod, err := c.Import(name)
+		if err != nil {
+			t.Fatalf("重复 import %s: %v", name, err)
+		}
+		if got := int(mod.(*object.PyObj).ID >> 48); got != i {
+			t.Fatalf("重复 import %s 落在 worker %d，期望亲和到 %d", name, got, i)
+		}
+	}
+	for _, st := range c.PoolStats() {
+		if st.Modules != 1 {
+			t.Fatalf("worker %d 模块数 = %d，期望 1（同名重复 import 不应重复计数）", st.Idx, st.Modules)
+		}
+		if !st.Alive {
+			t.Fatalf("worker %d 应为存活（池内每个 worker 都被路由到过）", st.Idx)
+		}
+	}
+
+	// 每个 worker 上的句柄都必须能正常 get（回到正确子进程）
 	for i, m := range handles {
-		fn, err := c.GetAttr(m, "dumps")
+		name, err := c.GetAttr(m, "__name__")
 		if err != nil {
-			t.Fatalf("worker %d getattr: %v", i, err)
+			t.Fatalf("worker %d getattr __name__: %v", i, err)
 		}
-		f, ok := fn.(*object.PyObj)
-		if !ok || !f.Callable {
-			t.Fatalf("worker %d dumps 不是可调用句柄: %#v", i, fn)
+		if name.Inspect() != modNames[i] {
+			t.Fatalf("worker %d 模块名 = %s，期望 %s", i, name.Inspect(), modNames[i])
 		}
-		arr := &object.Array{Elements: []object.Object{&object.Integer{Value: int64(i)}}}
-		out, err := c.Call(f, []object.Object{arr}, nil)
-		if err != nil {
-			t.Fatalf("worker %d call: %v", i, err)
-		}
-		if want := "[" + strconv.Itoa(i) + "]"; out.Inspect() != want {
-			t.Fatalf("worker %d json.dumps = %s，期望 %s", i, out.Inspect(), want)
-		}
+	}
+
+	// call 链走 worker 0（json）：dumps 必须正常抵达子进程
+	fn, err := c.GetAttr(handles[0], "dumps")
+	if err != nil {
+		t.Fatalf("worker 0 getattr dumps: %v", err)
+	}
+	f, ok := fn.(*object.PyObj)
+	if !ok || !f.Callable {
+		t.Fatalf("worker 0 dumps 不是可调用句柄: %#v", fn)
+	}
+	arr := &object.Array{Elements: []object.Object{&object.Integer{Value: 7}}}
+	out, err := c.Call(f, []object.Object{arr}, nil)
+	if err != nil {
+		t.Fatalf("worker 0 call: %v", err)
+	}
+	if out.Inspect() != "[7]" {
+		t.Fatalf("worker 0 json.dumps = %s，期望 [7]", out.Inspect())
 	}
 
 	// 释放后该 worker 上再取属性必须失败（句柄已从子进程句柄表摘除）
 	if err := c.Release(handles[2]); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	if _, err := c.GetAttr(handles[2], "dumps"); err == nil {
+	if _, err := c.GetAttr(handles[2], "__name__"); err == nil {
 		t.Fatal("已释放的句柄不应再可用")
 	}
 	// 其他 worker 不受影响
-	if _, err := c.GetAttr(handles[3], "dumps"); err != nil {
+	if _, err := c.GetAttr(handles[3], "__name__"); err != nil {
 		t.Fatalf("worker 3 被误伤: %v", err)
 	}
 }
@@ -335,9 +367,12 @@ func TestPoolCrossWorkerHandleRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m1, err := c.Import("json") // worker 1
+	m1, err := c.Import("os") // worker 1（第34轮：不同模块才轮询到不同 worker）
 	if err != nil {
 		t.Fatal(err)
+	}
+	if int(m0.(*object.PyObj).ID>>48) == int(m1.(*object.PyObj).ID>>48) {
+		t.Fatalf("两个不同模块应落在不同 worker，实际都是 %d", int(m0.(*object.PyObj).ID>>48))
 	}
 	fn0, err := c.GetAttr(m0.(*object.PyObj), "dumps")
 	if err != nil {
@@ -382,16 +417,29 @@ func TestPoolWorkerRestartInvalidatesHandle(t *testing.T) {
 		t.Fatalf("旧句柄应报失效，实际: %v", err)
 	}
 
-	// 另一 worker 不受影响：轮询到 worker 1 的 import 仍可正常使用
-	m1, err := c.Import("os")
+	// 亲和关系跨重启保留：重导入 os 仍回 worker 0，新进程里重新加载后可用
+	mo, err := c.Import("os")
+	if err != nil {
+		t.Fatal(err)
+	}
+	po := mo.(*object.PyObj)
+	if got := int(po.ID >> 48); got != 0 {
+		t.Fatalf("重启后 import os 落在 worker %d，期望亲和到 0", got)
+	}
+	if _, err := c.GetAttr(po, "name"); err != nil {
+		t.Fatalf("重启后重新导入的 os 不可用: %v", err)
+	}
+
+	// 另一 worker 不受影响：新模块轮询到 worker 1，句柄可正常使用
+	m1, err := c.Import("sys")
 	if err != nil {
 		t.Fatal(err)
 	}
 	p1 := m1.(*object.PyObj)
 	if got := int(p1.ID >> 48); got != 1 {
-		t.Fatalf("重启后 import 落在 worker %d，期望轮询到 1", got)
+		t.Fatalf("重启后新模块 import 落在 worker %d，期望轮询到 1", got)
 	}
-	if _, err := c.GetAttr(p1, "name"); err != nil {
+	if _, err := c.GetAttr(p1, "version"); err != nil {
 		t.Fatalf("worker 1 被误伤: %v", err)
 	}
 }
@@ -407,30 +455,55 @@ func TestPoolParallelSpeedup(t *testing.T) {
 	const iters = 30
 	const nap = 0.002
 
-	mkSleep := func() *object.PyObj {
-		mod, err := c.Import("time")
-		if err != nil {
-			t.Fatal(err)
-		}
-		fn, err := c.GetAttr(mod.(*object.PyObj), "sleep")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return fn.(*object.PyObj)
+	// 第34轮模块亲和：同名模块恒在同一 worker，所以两个「睡眠入口」必须来自不同模块：
+	//   worker 0 → time.sleep(秒)；worker 1 → importlib.import_module("time").sleep(秒)
+	// （不用 select.select / Event.wait：Windows 上前者要先 WSAStartup 报 WinError 10093，
+	//   后者受系统时钟粒度限成 ~15ms，会把并行度测成 0.3×）
+	timeMod, err := c.Import("time")
+	if err != nil {
+		t.Fatal(err)
 	}
-	sleep0, sleep1 := mkSleep(), mkSleep() // worker 0 / worker 1
+	sleepFn, err := c.GetAttr(timeMod.(*object.PyObj), "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sleep0 := sleepFn.(*object.PyObj)
+	args0 := func() []object.Object { return []object.Object{&object.Float{Value: nap}} }
+
+	ilMod, err := c.Import("importlib")
+	if err != nil {
+		t.Fatal(err)
+	}
+	importModule, err := c.GetAttr(ilMod.(*object.PyObj), "import_module")
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeMod1, err := c.Call(importModule.(*object.PyObj), []object.Object{&object.String{Value: "time"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm1, ok := timeMod1.(*object.PyObj)
+	if !ok {
+		t.Fatalf("import_module(\"time\") 未返回句柄: %#v", timeMod1)
+	}
+	waitFn, err := c.GetAttr(tm1, "sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sleep1 := waitFn.(*object.PyObj)
+	args1 := func() []object.Object { return []object.Object{&object.Float{Value: nap}} }
 	if int(sleep0.ID>>48) != 0 || int(sleep1.ID>>48) != 1 {
 		t.Fatalf("睡眠句柄未落在不同 worker: #%d / #%d", sleep0.ID, sleep1.ID)
 	}
 
-	one := func(fn *object.PyObj) error {
-		_, err := c.Call(fn, []object.Object{&object.Float{Value: nap}}, nil)
+	one := func(fn *object.PyObj, args []object.Object) error {
+		_, err := c.Call(fn, args, nil)
 		return err
 	}
 	serial := func() time.Duration {
 		st := time.Now()
 		for i := 0; i < iters; i++ {
-			if err := one(sleep0); err != nil {
+			if err := one(sleep0, args0()); err != nil {
 				t.Fatalf("serial sleep: %v", err)
 			}
 		}
@@ -440,17 +513,17 @@ func TestPoolParallelSpeedup(t *testing.T) {
 		st := time.Now()
 		var wg sync.WaitGroup
 		wg.Add(2)
-		run := func(fn *object.PyObj) {
+		run := func(fn *object.PyObj, args []object.Object) {
 			defer wg.Done()
 			for i := 0; i < iters/2; i++ {
-				if err := one(fn); err != nil {
+				if err := one(fn, args); err != nil {
 					t.Errorf("parallel sleep: %v", err)
 					return
 				}
 			}
 		}
-		go run(sleep0)
-		go run(sleep1)
+		go run(sleep0, args0())
+		go run(sleep1, args1())
 		wg.Wait()
 		return time.Since(st)
 	}
@@ -468,6 +541,102 @@ func TestPoolParallelSpeedup(t *testing.T) {
 	t.Logf("单 worker %s / 双 worker %s = %.2f×", s1, p1, ratio)
 	if ratio < 1.6 {
 		t.Fatalf("双 goroutine 吞吐仅 %.2f×（< 1.6×），连接池未真正并行", ratio)
+	}
+}
+
+// TestPoolModuleAffinity 第34轮：ZUZO_PY_POOL=4 下连续 3 次 Import("math") 必须落在同一 worker。
+func TestPoolModuleAffinity(t *testing.T) {
+	c := newPoolClient(t, 4)
+
+	first := -1
+	for i := 0; i < 3; i++ {
+		mod, err := c.Import("math")
+		if err != nil {
+			t.Fatalf("第 %d 次 import math: %v", i, err)
+		}
+		p, ok := mod.(*object.PyObj)
+		if !ok {
+			t.Fatalf("import 未返回句柄: %#v", mod)
+		}
+		idx := int(p.ID >> 48)
+		if first < 0 {
+			first = idx
+		} else if idx != first {
+			t.Fatalf("第 %d 次 import math 落在 worker %d，期望亲和到 %d（同名模块不得散到多个子进程）", i, idx, first)
+		}
+		// 句柄必须真的能用在那个子进程上
+		pi, err := c.GetAttr(p, "pi")
+		if err != nil {
+			t.Fatalf("第 %d 次 math.pi 取不到: %v", i, err)
+		}
+		if f, ok := pi.(*object.Float); !ok || f.Value < 3.14 {
+			t.Fatalf("math.pi 异常: %#v", pi)
+		}
+	}
+
+	// PoolStats 佐证：只有亲和 worker 有模块，其余 worker 不应被偷偷加载一份
+	stats := c.PoolStats()
+	if len(stats) != 4 {
+		t.Fatalf("PoolStats 长度 = %d，期望 4", len(stats))
+	}
+	for _, st := range stats {
+		if st.Idx == first {
+			if st.Modules != 1 {
+				t.Fatalf("worker %d 模块数 = %d，期望 1", st.Idx, st.Modules)
+			}
+			if !st.Alive || st.Calls == 0 {
+				t.Fatalf("worker %d 状态异常: %+v", st.Idx, st)
+			}
+			continue
+		}
+		if st.Modules != 0 {
+			t.Fatalf("worker %d 也加载了模块（模块数 %d），亲和失效", st.Idx, st.Modules)
+		}
+	}
+}
+
+// TestPoolImportLoadsOnce 第34轮：并发同名导入只加载一份（PoolStats().Modules 总和 = 1）。
+func TestPoolImportLoadsOnce(t *testing.T) {
+	c := newPoolClient(t, 4)
+
+	const n = 4
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	idxs := make([]int, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			mod, err := c.Import("math")
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			idxs[i] = int(mod.(*object.PyObj).ID >> 48)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("第 %d 个并发 import 失败: %v", i, err)
+		}
+	}
+	for i := 1; i < n; i++ {
+		if idxs[i] != idxs[0] {
+			t.Fatalf("并发 import math 散到了多个 worker: %v（并发同名导入必须合并到同一 worker）", idxs)
+		}
+	}
+
+	total := 0
+	for _, st := range c.PoolStats() {
+		total += st.Modules
+	}
+	if total != 1 {
+		t.Fatalf("PoolStats().Modules 总和 = %d，期望 1（同名模块只加载一份）", total)
 	}
 }
 

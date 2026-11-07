@@ -555,16 +555,16 @@ func displayWidth(s string) int {
 func isWideRune(r rune) bool {
 	switch {
 	case r >= 0x1100 && r <= 0x115F, // 谚文字母
-		r >= 0x2E80 && r <= 0x303E, // CJK 部首/标点
-		r >= 0x3041 && r <= 0x33FF, // 假名/CJK 兼容
-		r >= 0x3400 && r <= 0x4DBF, // CJK 扩展 A
-		r >= 0x4E00 && r <= 0x9FFF, // CJK 基本区
-		r >= 0xA000 && r <= 0xA4CF, // 彝文
-		r >= 0xAC00 && r <= 0xD7A3, // 谚文音节
-		r >= 0xF900 && r <= 0xFAFF, // CJK 兼容表意
-		r >= 0xFE30 && r <= 0xFE6F, // CJK 兼容形式
-		r >= 0xFF00 && r <= 0xFF60, // 全角 ASCII
-		r >= 0xFFE0 && r <= 0xFFE6, // 全角符号
+		r >= 0x2E80 && r <= 0x303E,   // CJK 部首/标点
+		r >= 0x3041 && r <= 0x33FF,   // 假名/CJK 兼容
+		r >= 0x3400 && r <= 0x4DBF,   // CJK 扩展 A
+		r >= 0x4E00 && r <= 0x9FFF,   // CJK 基本区
+		r >= 0xA000 && r <= 0xA4CF,   // 彝文
+		r >= 0xAC00 && r <= 0xD7A3,   // 谚文音节
+		r >= 0xF900 && r <= 0xFAFF,   // CJK 兼容表意
+		r >= 0xFE30 && r <= 0xFE6F,   // CJK 兼容形式
+		r >= 0xFF00 && r <= 0xFF60,   // 全角 ASCII
+		r >= 0xFFE0 && r <= 0xFFE6,   // 全角符号
 		r >= 0x1F300 && r <= 0x1FAFF, // emoji
 		r >= 0x20000 && r <= 0x3FFFD: // CJK 扩展 B+
 		return true

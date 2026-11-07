@@ -1563,6 +1563,9 @@ func registerBuiltins(env *object.Environment) {
 		"去除不可见":      builtinRemoveInvisible,
 		"去除BOM":      builtinRemoveBOM,
 
+		// --- 断言（builtins_assert.go · 语言级守卫，第34轮 w3） ---
+		"断言": builtinAssert,
+
 		// --- BDD 测试框架（builtins_bdd.go） ---
 		"测试套件":   builtinTestSuite,
 		"测试用例":   builtinTestCase,

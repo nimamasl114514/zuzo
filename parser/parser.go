@@ -287,7 +287,6 @@ func (p *Parser) ParseProgram() *ast.Program {
 	program := &ast.Program{}
 	program.Statements = []ast.Statement{}
 
-
 	for !p.curTokenIs(token.EOF) {
 		if p.curTokenIs(token.SEMICOLON) {
 			p.nextToken()

@@ -21,9 +21,17 @@ package pyext
 //       先 py执行("x=1") 后 py求值("x") 取不到值，故不做轮询；
 //   - 每个 worker 独立超时杀进程 + 独立重启；会话戳（checkHandle 的 ABA 防护）按 worker 校验。
 //
+// 模块亲和（第34轮）：同一个模块名固定落在同一个 worker 上（moduleWorker 表）。首次
+// py导入("numpy") 轮询分配并登记，之后同名 py导入 一律回到该 worker —— 避免 N 个 worker
+// 各加载一份 numpy（40MB×N）。若该 worker 崩了重启，亲和关系保留，下次 py导入 在新进程里
+// 重新加载（句柄换新，旧句柄按会话戳失效）。并发同名导入只由一个调用真正触发加载，其余等待
+// 其完成后复用（见 Import 的占位 + ready 通道）。
+//
 // 语义边界（重要）：跨 worker 的句柄不通用。worker A 上导入的模块/对象只能与 A 上的句柄
 // 互相操作；把 A 的句柄当参数传给 B 的调用会明确报错（见 localizeHandle）。需要「一组操作
-// 原子地在同一进程内完成」时，请沿同一条 py导入 句柄链走完，不要中途换句柄。
+// 原子地在同一进程内完成」时，请沿同一条 py导入 句柄链走完，不要中途换句柄。模块亲和是
+// 句柄路由的补充而非替代：亲和只保证「同名模块落在同一 worker」，不保证「不同模块落在同一
+// worker」——需要共享同一 globals/进程状态的不同模块，仍须显式串在同一条句柄链上。
 //
 // 故障：读管道 EOF / 超时 → 杀该 worker 并标记 dead，下次调用尝试重启一次。
 
@@ -82,6 +90,19 @@ type worker struct {
 	startedAt time.Time
 
 	scriptPath string
+
+	// 诊断统计（第34轮）：mods 受 w.mu 保护（不入亲和锁，避免锁序成环）
+	mods  map[string]struct{} // 当前子进程里成功导入过的模块名
+	calls int64               // 原子：该 worker 上的往返次数
+}
+
+// moduleAffinity 模块亲和表项（第34轮）
+//
+// ready 为 nil → 已加载完成，idx 即为固定 worker；
+// ready 非 nil → 该模块正在由某个调用加载，其他调用等 ready 关闭后再取。
+type moduleAffinity struct {
+	idx   int
+	ready chan struct{}
 }
 
 // Client 一个 CPython 子进程桥实例（1..N 个 worker）
@@ -102,6 +123,12 @@ type Client struct {
 
 	callCount int64 // 原子计数：全部 worker 之和
 	failCount int64
+
+	// 模块亲和（第34轮）：模块名 → 固定 worker 序号
+	//   affMu 是唯一的亲和锁；持锁期间绝不做子进程往返（只登记 / 查表 / 建通道），
+	//   加载本身在锁外完成，避免慢 import（numpy）阻塞整张表或造成锁序成环。
+	affMu        sync.Mutex
+	moduleWorker map[string]*moduleAffinity
 }
 
 // poolSizeFromEnv 读取 ZUZO_PY_POOL（默认 1 = 保持第32轮行为）
@@ -130,11 +157,15 @@ func New() *Client {
 			DefaultTimeout = time.Duration(ms) * time.Millisecond
 		}
 	}
-	c := &Client{noticeOut: os.Stderr, quiet: q == "1" || q == "true"}
+	c := &Client{
+		noticeOut:    os.Stderr,
+		quiet:        q == "1" || q == "true",
+		moduleWorker: make(map[string]*moduleAffinity),
+	}
 	n := poolSizeFromEnv()
 	c.workers = make([]*worker, n)
 	for i := 0; i < n; i++ {
-		c.workers[i] = &worker{idx: i}
+		c.workers[i] = &worker{idx: i, mods: make(map[string]struct{})}
 	}
 	return c
 }
@@ -408,6 +439,8 @@ func (c *Client) killWorkerLocked(w *worker) {
 	w.started = false
 	// 会话戳随进程一起作废（下次 start 会拿到新的 session）
 	w.session = ""
+	// 新进程的 sys.modules 是空的：模块统计必须清零（亲和表保留，下次 py导入 会重新加载）
+	w.mods = make(map[string]struct{})
 }
 
 // ==================== 单次往返 ====================
@@ -463,6 +496,7 @@ func (c *Client) roundTripLocked(w *worker, op string, payload map[string]any, t
 		return nil, fmt.Errorf("pyext: 写管道失败: %v", err)
 	}
 	atomic.AddInt64(&c.callCount, 1)
+	atomic.AddInt64(&w.calls, 1)
 
 	type readResult struct {
 		resp wireResp
@@ -684,9 +718,87 @@ func (c *Client) SetSticky(v bool) {
 	c.sticky = v
 }
 
-// Import 导入一个 Python 模块（round-robin 分配 worker，句柄因此带上路由信息）
+// Import 导入一个 Python 模块。
+//
+// 模块亲和（第34轮）：同名模块固定落在同一个 worker 上——
+//   - 亲和表命中：直接用记录的 worker（进程已加载，子进程侧走 sys.modules 缓存，代价极低）；
+//   - 未命中：nextWorker() 轮询取一个 worker，登记后加载；
+//   - 并发同名导入：先到的调用在表里放「加载中」占位，后到的等 ready 通道关闭后复用，
+//     不会出现两个 worker 各加载一份（numpy 40MB×N 的根源）。
+//
+// 持锁期间不做任何子进程往返（慢 import 不能阻塞整张亲和表，也不能与 w.mu 成环）。
 func (c *Client) Import(name string) (object.Object, error) {
-	return c.callWorker(c.nextWorker(), "import", map[string]any{"name": name}, 0, false)
+	if name == "" {
+		return nil, errors.New("pyext: 模块名不能为空")
+	}
+	for {
+		c.affMu.Lock()
+		if e, ok := c.moduleWorker[name]; ok {
+			if e.ready == nil { // 已加载：亲和命中
+				idx := e.idx
+				c.affMu.Unlock()
+				return c.callWorker(c.workers[idx], "import", map[string]any{"name": name}, 0, false)
+			}
+			// 加载中：等它结束（不在持锁时阻塞）
+			wait := e.ready
+			c.affMu.Unlock()
+			<-wait
+			continue // 回到循环：成功则命中，失败则占位已被删除（可重新认领）
+		}
+		// 未命中：登记占位并认领这次加载
+		e := &moduleAffinity{idx: c.nextWorker().idx, ready: make(chan struct{})}
+		c.moduleWorker[name] = e
+		c.affMu.Unlock()
+
+		obj, err := c.callWorker(c.workers[e.idx], "import", map[string]any{"name": name}, 0, false)
+
+		c.affMu.Lock()
+		if err != nil {
+			// 加载失败：撤销占位，让下一个调用重试（不能把失败永久钉在亲和表里）
+			delete(c.moduleWorker, name)
+			c.affMu.Unlock()
+			close(e.ready)
+			return nil, err
+		}
+		done := e.ready
+		e.ready = nil // 先标记完成，再唤醒等待者（它们醒来后走亲和命中分支，不会重复加载）
+		c.affMu.Unlock()
+		close(done)
+
+		w := c.workers[e.idx]
+		w.mu.Lock()
+		if w.mods == nil {
+			w.mods = make(map[string]struct{})
+		}
+		w.mods[name] = struct{}{}
+		w.mu.Unlock()
+		return obj, nil
+	}
+}
+
+// WorkerStat 单个 worker 的诊断快照（PoolStats）
+type WorkerStat struct {
+	Idx     int   // 池内序号（也是句柄高 16 位的值）
+	Modules int   // 当前子进程里已导入的模块数（重启后清零）
+	Alive   bool  // 子进程是否在跑
+	Calls   int64 // 累计往返次数（进程级累计，不随重启清零）
+}
+
+// PoolStats 快照每个 worker 的状态（诊断用，不改 JSON 协议）
+func (c *Client) PoolStats() []WorkerStat {
+	out := make([]WorkerStat, len(c.workers))
+	for i, w := range c.workers {
+		w.mu.Lock()
+		st := WorkerStat{
+			Idx:     w.idx,
+			Modules: len(w.mods),
+			Alive:   w.started && !w.dead,
+			Calls:   atomic.LoadInt64(&w.calls),
+		}
+		w.mu.Unlock()
+		out[i] = st
+	}
+	return out
 }
 
 // GetAttr 取属性

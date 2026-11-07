@@ -284,6 +284,28 @@ func copyFile(src, dst string) error {
 }
 
 // BuildExe 把源码编译为可执行文件：IR → clang -c → 链接运行时 obj。
+// defaultOpt 是未指定 ZUZO_OPT 时的优化档位，保持与历史行为一致。
+const defaultOpt = "-O2"
+
+// optFlag 从环境变量 ZUZO_OPT 解析 C 编译器的优化档位。
+// 白名单：-O0 / -O1 / -O2 / -O3 / -Os / -Oz（大小写不敏感，如 -oz 视作 -Oz）；
+// 未设置或非法值一律回落到 -O2，保证普通构建行为不变。
+func optFlag() string {
+	v := strings.TrimSpace(os.Getenv("ZUZO_OPT"))
+	if len(v) < 3 || !strings.HasPrefix(v, "-O") {
+		return defaultOpt
+	}
+	switch strings.ToLower(v[2:]) {
+	case "0", "1", "2", "3":
+		return "-O" + v[2:]
+	case "s":
+		return "-Os"
+	case "z":
+		return "-Oz"
+	}
+	return defaultOpt
+}
+
 // 跨平台（ZUZO_TARGET 与宿主不一致）只支持 --emit-llvm：本机缺少目标平台的 CRT 与链接器。
 func BuildExe(srcPath, outExe string) (llPath string, exePath string, err error) {
 	if v := strings.TrimSpace(os.Getenv("ZUZO_TARGET")); v != "" && v != hostTriple() {
@@ -338,7 +360,8 @@ func BuildExe(srcPath, outExe string) (llPath string, exePath string, err error)
 
 	mainObj := filepath.Join(work, "main.obj")
 	// zig cc 不认 "-x ir"（实测报 language not recognized），靠 .ll 扩展名识别即可
-	irArgs := []string{"-c", "-O2", "-Wno-override-module"}
+	opt := optFlag()
+	irArgs := []string{"-c", opt, "-Wno-override-module"}
 	if cc.Name != "zig cc" {
 		irArgs = append(irArgs, "-x", "ir")
 	}
@@ -347,7 +370,7 @@ func BuildExe(srcPath, outExe string) (llPath string, exePath string, err error)
 		return llPath, absOut, fmt.Errorf("LLVM IR 编译失败：\n%s", string(out))
 	}
 	rtObj := filepath.Join(work, "zuzo_rt.obj")
-	if out, err := run("-c", "-O2", "-std=c11", "-I", work, rtC, "-o", rtObj); err != nil {
+	if out, err := run("-c", opt, "-std=c11", "-I", work, rtC, "-o", rtObj); err != nil {
 		return llPath, absOut, fmt.Errorf("运行时编译失败：\n%s", string(out))
 	}
 	buildOut := filepath.Join(work, "a.out"+exeSuffix())

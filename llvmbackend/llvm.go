@@ -114,18 +114,18 @@ func (b *fnBuilder) nextLabel() string {
 
 // Gen LLVM IR 生成器。
 type Gen struct {
-	opt        Options
-	ana        *analysis
-	funcs      map[string]*fnInfo
-	order      []string
-	defines    map[string]*ast.DefineStatement
-	defOrder   []string
-	globals    map[string]bool
+	opt         Options
+	ana         *analysis
+	funcs       map[string]*fnInfo
+	order       []string
+	defines     map[string]*ast.DefineStatement
+	defOrder    []string
+	globals     map[string]bool
 	globalOrder []string
-	globalLine map[string]int
-	scopes     []map[string]varSlot
-	cur        *fnInfo
-	errs       []string
+	globalLine  map[string]int
+	scopes      []map[string]varSlot
+	cur         *fnInfo
+	errs        []string
 
 	// 模块拼装
 	strDefs    []string

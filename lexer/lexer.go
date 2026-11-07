@@ -8,7 +8,6 @@ import (
 )
 
 // Error 一个词法层错误（未闭合字符串等），由解析器统一并入诊断报告
-//
 type Error struct {
 	Code    string // 错误码，如 E007
 	Message string
@@ -18,12 +17,12 @@ type Error struct {
 
 // Lexer 词法分析器，将源代码字符串转换为词法单元序列
 type Lexer struct {
-	input        []rune // 源代码（rune 切片，支持 UTF-8 中文）
-	position     int    // 当前字符位置
-	readPosition int    // 下一个读取位置
-	ch           rune   // 当前字符
-	line         int    // 当前行号
-	column       int    // 当前列号
+	input        []rune  // 源代码（rune 切片，支持 UTF-8 中文）
+	position     int     // 当前字符位置
+	readPosition int     // 下一个读取位置
+	ch           rune    // 当前字符
+	line         int     // 当前行号
+	column       int     // 当前列号
 	errors       []Error // 词法错误（不中断扫描，交给解析器统一上报）
 }
 

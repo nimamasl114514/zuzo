@@ -3,12 +3,13 @@ package main
 // toolchain.go — zpm 的工具链与构建子命令（第32轮，第33轮加 --release 与 Python 桥）
 //
 //	zpm doctor              体检：工具链（clang / zig cc）、zuzo 可执行文件、Python 桥（解释器/版本/模式）、当前目录清单
-//	zpm build [入口] [-o 输出] [--release]  把入口 .hy 编译成原生 exe（走 zuzo --emit-exe；没 clang 时自动用自带的 zig cc）
+//	zpm build [入口] [-o 输出] [--release[=O0|O1|O2|O3|Os|Oz]]  把入口 .hy 编译成原生 exe（走 zuzo --emit-exe；没 clang 时自动用自带的 zig cc）
 //	zpm toolchain [status|install|env]  直接透传 zuzo toolchain
 //
 // 设计口径：zpm 自己不做编译，编译能力全部复用 zuzo；zpm 只负责「找到对的 zuzo 与对的 CC」。
-// --release 的实现口径：不改 llvmbackend，只在子进程环境里把 ZUZO_CC 改写成
-// 「真实编译器 + 发布参数」，让 zuzo 的 clang/zig cc 调用自带 -O3 与 strip（详见 releaseCC）。
+// --release 的实现口径：把子进程环境里的 ZUZO_CC 改写成「真实编译器 + 发布参数」，
+// 并用 ZUZO_OPT 把优化档位（默认 O3）交给 llvmbackend（它据此替换内置的 -O2），
+// strip / gc-sections 仍由 ZUZO_CC 前缀里的 -s 等参数负责（详见 releaseCC 与 releaseFlags）。
 
 import (
 	"fmt"
@@ -108,24 +109,50 @@ func doctorPythonBridge(zuzo string) {
 	fmt.Printf("  模式        : %s\n", strings.TrimSpace(lines[2]))
 }
 
-// releaseFlags --release 注入编译器的发布参数：
-//   - -O3                              优化（注意：llvmbackend 在 IR/运行时编译行里硬编码了 -O2 且排在其后，
-//     按 clang「后者生效」的规则，本项声明性透传，实际优化级别仍以 -O2 为准，行为与普通构建一致）
+// releaseTail --release 注入编译器的非优化类参数：
 //   - -s                               strip 符号表（体积主要收益，COFF 符号表占大头）
 //   - -ffunction-sections -fdata-sections -Wl,--gc-sections   链接期裁掉未引用的运行时函数
-const releaseFlags = "-O3 -s -ffunction-sections -fdata-sections -Wl,--gc-sections"
+const releaseTail = "-s -ffunction-sections -fdata-sections -Wl,--gc-sections"
+
+// defaultReleaseLevel 是 --release 不带级别时的优化档位。
+const defaultReleaseLevel = "O3"
+
+// parseReleaseLevel 把用户输入的档位规范成 O0/O1/O2/O3/Os/Oz（大小写不敏感，容忍前导 '-'）。
+// 白名单以外的值返回 false，由调用方报错退出，绝不静默降级。
+func parseReleaseLevel(s string) (string, bool) {
+	v := strings.TrimSpace(s)
+	v = strings.TrimPrefix(v, "-")
+	if len(v) < 2 || (v[0] != 'O' && v[0] != 'o') {
+		return "", false
+	}
+	switch strings.ToLower(v[1:]) {
+	case "0", "1", "2", "3":
+		return "O" + v[1:], true
+	case "s":
+		return "Os", true
+	case "z":
+		return "Oz", true
+	}
+	return "", false
+}
+
+// releaseFlags 返回 --release 的完整参数串：优化档位在前，strip/gc 在后。
+func releaseFlags(level string) string {
+	return "-" + level + " " + releaseTail
+}
 
 // releaseCC 组装 --release 用的 ZUZO_CC 值：真实编译器路径 + 必要前缀 + 发布参数。
 // zuzo 侧 llvmbackend.FindCompiler 先按空格切分 ZUZO_CC（首段是可执行文件，其余当前缀），
 // 所以这里的路径不能含空格；zig 需要补 "cc -target x86_64-windows-msvc" 才能当 CC 用。
-func releaseCC() (string, error) {
+func releaseCC(level string) (string, error) {
+	flags := releaseFlags(level)
 	// 用户已显式指定：保留原样，只追加发布参数
 	if v := strings.TrimSpace(os.Getenv("ZUZO_CC")); v != "" {
 		exe := strings.Fields(v)[0]
 		if st, err := os.Stat(exe); err != nil || st.IsDir() {
 			return "", fmt.Errorf("ZUZO_CC 首段不是可执行文件：%s（路径含空格时请先用 zuzo toolchain install 换到无空格目录）", exe)
 		}
-		return v + " " + releaseFlags, nil
+		return v + " " + flags, nil
 	}
 
 	r := toolchain.Status()
@@ -145,9 +172,9 @@ func releaseCC() (string, error) {
 		return "", fmt.Errorf("编译器路径含空格，无法通过 ZUZO_CC 注入发布参数：%s（可设 ZUZO_CC 显式指定）", exe)
 	}
 	if prefix != "" {
-		return exe + " " + prefix + " " + releaseFlags, nil
+		return exe + " " + prefix + " " + flags, nil
 	}
-	return exe + " " + releaseFlags, nil
+	return exe + " " + flags, nil
 }
 
 // cmdBuild 把 .hy 编译成原生 exe
@@ -155,18 +182,29 @@ func cmdBuild(args []string) {
 	entry := ""
 	out := ""
 	release := false
+	level := defaultReleaseLevel
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-o", "--output":
+		a := args[i]
+		// --release / --发布 支持两种写法：裸开关（默认 O3）与 =级别（O0/O1/O2/O3/Os/Oz）。
+		switch {
+		case a == "--release" || a == "--发布":
+			release, level = true, defaultReleaseLevel
+		case strings.HasPrefix(a, "--release=") || strings.HasPrefix(a, "--发布="):
+			raw := a[strings.IndexByte(a, '=')+1:]
+			lv, ok := parseReleaseLevel(raw)
+			if !ok {
+				fmt.Fprintf(os.Stderr, "zpm build: 非法的发布级别 %q（可选 O0/O1/O2/O3/Os/Oz）\n", raw)
+				os.Exit(2)
+			}
+			release, level = true, lv
+		case a == "-o" || a == "--output":
 			if i+1 < len(args) {
 				out = args[i+1]
 				i++
 			}
-		case "--release", "--发布":
-			release = true
 		default:
-			if !strings.HasPrefix(args[i], "-") && entry == "" {
-				entry = args[i]
+			if !strings.HasPrefix(a, "-") && entry == "" {
+				entry = a
 			}
 		}
 	}
@@ -188,7 +226,7 @@ func cmdBuild(args []string) {
 		}
 	}
 	if entry == "" {
-		fmt.Fprintln(os.Stderr, "zpm build: 没找到入口文件（用法：zpm build <入口.hy> [-o 输出.exe]）")
+		fmt.Fprintln(os.Stderr, "zpm build: 没找到入口文件（用法：zpm build <入口.hy> [-o 输出.exe] [--release[=O0|O1|O2|O3|Os|Oz]]）")
 		os.Exit(2)
 	}
 	zuzo := findZuzo()
@@ -205,14 +243,16 @@ func cmdBuild(args []string) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if release {
-		ccEnv, err := releaseCC()
+		ccEnv, err := releaseCC(level)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "zpm build --release: %v\n", err)
 			os.Exit(2)
 		}
-		fmt.Printf("发布模式: ZUZO_CC=%s\n", ccEnv)
-		// 子进程环境里改写 ZUZO_CC（os/exec 会去重，保留最后一个值），llvmbackend 据此带发布参数
-		cmd.Env = append(os.Environ(), "ZUZO_CC="+ccEnv)
+		fmt.Printf("发布模式: -%s（ZUZO_OPT=-%s）\n", level, level)
+		fmt.Printf("          ZUZO_CC=%s\n", ccEnv)
+		// 子进程环境里改写 ZUZO_CC 与 ZUZO_OPT（os/exec 会去重，保留最后一个值）：
+		// ZUZO_OPT 让 llvmbackend 用它替换内置的 -O2，档位才真正生效。
+		cmd.Env = append(os.Environ(), "ZUZO_CC="+ccEnv, "ZUZO_OPT=-"+level)
 	}
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "zpm build 失败: %v\n", err)

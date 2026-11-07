@@ -26,6 +26,12 @@ func (i *Inferencer) builtinType(name string) (Type, bool) {
 		tv := i.newTypeVar()
 		return TypeFunc{Params: []Type{tv}, Return: TFloat}, true
 
+	// --- 断言（第34轮 w3） ---
+	// 断言(条件, 消息?)：条件按运行期 isTruthy 口径判定，静态期不约束类型；
+	// 返回放宽为 Variadic + TNull——成功返回空，失败直接抛运行期错误对象。
+	case "断言":
+		return TypeFunc{Params: []Type{TAny}, Return: TNull, Variadic: true}, true
+
 	// --- 真实 CPython 子进程桥（第32轮） ---
 	// 口径：全部按「任意参数、任意返回」放宽（返回值类型由远端决定，
 	// 静态期无法定死；参数个数由运行期内置函数自检报 E911/E913）。

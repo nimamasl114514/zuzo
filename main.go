@@ -10,18 +10,18 @@ import (
 
 	"zuzo/analyze"
 	"zuzo/ast"
-	"zuzo/llvmbackend"
 	"zuzo/diagnostic"
 	"zuzo/encoding"
 	"zuzo/evaluator"
 	"zuzo/infer"
 	"zuzo/lexer"
+	"zuzo/llvmbackend"
 	"zuzo/mix"
 	"zuzo/object"
 	"zuzo/parser"
+	pyrt "zuzo/py/runtime"
 	"zuzo/pyext"
 	"zuzo/toolchain"
-	pyrt "zuzo/py/runtime"
 )
 
 // zuzo — 一门中文编程语言
@@ -284,6 +284,8 @@ func main() {
 		pyrt.RunREPL(os.Stdin, os.Stdout, os.Stderr)
 	case "--py-repl":
 		pyrt.RunREPL(os.Stdin, os.Stdout, os.Stderr)
+	case "test", "测试":
+		runTestCommand(args[1:])
 	case "-h", "--help":
 		printHelp()
 	case "version", "--version":
@@ -770,6 +772,7 @@ func printHelp() {
   zuzo <文件.py>    执行 Python 源文件
   zuzo <文件.hypy>  执行 zuzo + Python 混合源文件
   zuzo -e "代码"    执行内联代码
+  zuzo test [目录]  运行 *_test.hy 用例
   zuzo -a <文件>    拓扑指纹分析（查重/死代码/CSE）
   zuzo -c <文件>    静态类型检查（加 --json 输出机器可读 JSON 数组）
   zuzo --emit-llvm <文件.hy> [-o 出.ll]  生成 LLVM IR（LLVM 后端）

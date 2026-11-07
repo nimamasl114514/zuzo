@@ -22,8 +22,8 @@ import (
 	"zuzo/evaluator"
 	"zuzo/mix"
 	"zuzo/object"
-	"zuzo/pyext"
 	pyrt "zuzo/py/runtime"
+	"zuzo/pyext"
 )
 
 var (
@@ -82,8 +82,8 @@ func (a pyExtAdapter) Activate() error {
 	a.c.SetNotice(os.Stderr)
 	return a.c.Activate()
 }
-func (a pyExtAdapter) Exec(code string) error       { return a.c.Exec(code) }
-func (a pyExtAdapter) Eval(expr string) (object.Object, error) { return a.c.Eval(expr) }
+func (a pyExtAdapter) Exec(code string) error                   { return a.c.Exec(code) }
+func (a pyExtAdapter) Eval(expr string) (object.Object, error)  { return a.c.Eval(expr) }
 func (a pyExtAdapter) Lookup(name string) (object.Object, bool) { return a.c.Lookup(name) }
 func (a pyExtAdapter) CallName(name string, args []object.Object) (object.Object, error) {
 	return a.c.CallName(name, args)

@@ -9,22 +9,22 @@ import (
 
 // fnInfo 一个 zuzo 函数（含嵌套闭包）的编译期信息
 type fnInfo struct {
-	Name     string // zuzo 名（匿名为空）
-	CName    string // C 函数名
-	Node     *ast.FunctionLiteral
-	Parent   *fnInfo
-	Children []*fnInfo
-	Locals   map[string]bool // 参数 + 直接声明的局部变量
-	Free     map[string]bool // 引用但未在本函数声明的名字（需要上传或捕获）
-	Captures []string        // 实际从父函数捕获的变量（按名字排序，稳定）
-	EnvType  string          // 生成的 env 结构体名（有捕获时非空）
-	IsClosure bool           // 是否作为值被使用（匿名 / 被返回 / 被赋值）
+	Name      string // zuzo 名（匿名为空）
+	CName     string // C 函数名
+	Node      *ast.FunctionLiteral
+	Parent    *fnInfo
+	Children  []*fnInfo
+	Locals    map[string]bool // 参数 + 直接声明的局部变量
+	Free      map[string]bool // 引用但未在本函数声明的名字（需要上传或捕获）
+	Captures  []string        // 实际从父函数捕获的变量（按名字排序，稳定）
+	EnvType   string          // 生成的 env 结构体名（有捕获时非空）
+	IsClosure bool            // 是否作为值被使用（匿名 / 被返回 / 被赋值）
 }
 
 // analysis 全程序闭包分析结果
 type analysis struct {
-	Roots []*fnInfo
-	All   []*fnInfo
+	Roots  []*fnInfo
+	All    []*fnInfo
 	byNode map[*ast.FunctionLiteral]*fnInfo
 	// boxed 需要在父函数里装箱的变量名（按父函数索引）
 	Boxed map[*fnInfo]map[string]bool

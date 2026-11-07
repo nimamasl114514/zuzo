@@ -376,3 +376,36 @@ EOF
 ---
 
 *生成时间：2026-10-25 · 依据：`zuzo.exe` 实测 20+ 组 + 源码清点 + `run_tests` 两套回归。*
+
+---
+
+## 13. 2026-11-07 复核（第34轮）
+
+> 只复核上表第 12 节里「文档与实际不符」的条目与能力矩阵中标注 ❌ 的项，不删历史结论。
+
+| # | 原登记 | 2026-11-07 实测 | 状态 |
+|---|---|---|---|
+| 1 | `language-overview.md` §12：内置 120+ 函数；能力盘点：注册表 175 个 / 19 类 | `grep -rhE '^\s+"[^"]+":\s+builtin' evaluator/*.go` → **219 个注册项**（`evaluator.go` 179 + `strlib_legacy.go` 36 + `strlib_split.go` 1 + `strlib_trim.go` 1 + `strlib_zh.go` 2） | 数量已变化，文档按 219 更新 |
+| 2 | `language-overview.md` §18 / README：`关闭浏览器()` 无参 | 未复跑（浏览器对象生命周期本轮未改动） | 保留 |
+| 3 | `interop.md` §三：`py获取("math").pi` | **仍不可用，但报错变了**：`E901 Python 侧未定义：math`（`py获取` 只接受 Python 句柄，不接受模块名字符串）；正确写法 `变量 m = py导入("math"); 打印(m.pi)` → `3.141592653589793` | 文档需改写示例 |
+| 4 | `python-support.md` §6：不支持 `ctypes` | `ctypes.create_string_buffer(8)` 实测可用（`len = 8`）；`CDLL` / `abs` 此前已通过 | 由「不支持」改为「支持子集」 |
+| 5 | `dev-status.md`：`run_tests` 30/34 | **33/33**（`SHADOW` 33/33），另 mix 15/15 · llvm 20/20 · bridge 19/19 · toolchain 6/6 · `go test ./...` 9 包全绿 | 已重写 `docs/dev-status.md` |
+| 6 | README 性能表：1e6 循环 23.6 ms | 本轮未复跑（改动未触及 SAP 热路径） | 保留声明值 |
+
+### 13.1 能力矩阵中 ❌ 项的现状
+
+| 矩阵行 | 原结论 | 2026-11-07 实测 |
+|---|---|---|
+| 第 12 行 · GUI 桌面程序 | ❌ 不支持 | **仍不支持**（无自绘窗口/控件/绘图；`打开浏览器` 是驱动外部 Chromium） |
+| 第 13 行 · sqlite3 / ssl / http.server / multiprocessing | ❌ 四项 `ModuleNotFoundError` | **已支持导入**：四项 `import` 均成功，`sqlite3.sqlite_version = 3.53.3` |
+
+### 13.2 复核用到的命令
+
+```bash
+cd D:/逆向/20261024-12-47-05-623/zuzo
+grep -rhE '^\s+"[^"]+":\s+builtin' evaluator/*.go | wc -l      # 219
+./zuzo.exe -e '变量 m = py导入("math"); 打印(m.pi)'            # 3.141592653589793
+./zuzo.exe -e 'py执行("import sqlite3; print(\"sqlite\", sqlite3.sqlite_version)")'
+./zuzo.exe -e 'py执行("import ctypes; b = ctypes.create_string_buffer(8); print(len(b))")'
+./zuzo.exe tests_py/t25_fstring_nested.py    # RC=0
+```
