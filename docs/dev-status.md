@@ -1,7 +1,7 @@
 # 开发状态（2026-11-07）
 
 > 本文件记录当前测试状态与已知缺口，避免「README 说能跑、实际不能跑」的落差。
-> 上一次全面刷新：**2026-11-07 第34轮**（以下数字均为当轮实跑；命令可直接复制复现）。
+> 上一次全面刷新：**2026-11-07 第36轮**（以下数字均为当轮实跑；命令可直接复制复现）。
 
 ## 一、测试矩阵（2026-11-07 实测）
 
@@ -10,13 +10,13 @@
 | Python 语义对拍 | `./run_tests.sh` | **33 / 33** | 与 CPython 3.12 逐字节 diff |
 | 影子模式（双轨） | `./run_tests.sh`（内含 `--shadow`） | **SHADOW 33 / 33** | SAP + Tree-Walk 双跑一致 |
 | 混合语言 golden | `./run_tests_mix.sh` | **15 / 15** | 切块、类型桥、调用桥、作用域同步 |
-| LLVM 后端对拍 | `./run_tests_llvm.sh` | **20 / 20** | 无 clang 时自动用自带 `zig cc` |
+| LLVM 后端对拍 | `./run_tests_llvm.sh` | **21 / 21** | 含 `t35_gen_gc` 分代 GC 用例；无 clang 时自动用自带 `zig cc` |
 | CPython 子进程桥 | `./run_tests_bridge.sh` | **19 / 19** | numpy / pandas / requests / 错误 / 句柄 / 索引 / 点号 |
 | 自带工具链 | `./run_tests_toolchain.sh` | **6 / 6** | status / env / zig 构建对拍 / zpm doctor / zpm build / URL 直下 |
-| Go 单测 | `CGO_ENABLED=1 CC="/c/Dev/zig/zig cc" go test ./...` | **9 包全绿** | `ast` `diagnostic` `evaluator` `fuzz` `infer` `llvmbackend` `mix` `pyext` `tests`；另有 19 包无测试文件 |
+| Go 单测 | `CGO_ENABLED=1 CC="<mingw64>/gcc.exe" go test ./...` | **9 包全绿** | `ast` `diagnostic` `evaluator` `fuzz` `infer` `llvmbackend` `mix` `pyext` `tests`；另有 19 包无测试文件 |
 | 语言用例运行器 | `./zuzo.exe test examples/tests` | **PASS 1 / FAIL 1**（退出码 1） | 样例目录故意含一个失败用例；单跑 `ok_test.hy` 为 PASS 1 / FAIL 0 |
 
-> 本机没有 gcc，所有 cgo 构建统一用 `CGO_ENABLED=1 CC="/c/Dev/zig/zig cc"`。
+> 本机 cgo 构建需**显式指定 CC**（Git Bash 的 PATH 不被 Go 子进程继承）：`CC="C:/Users/wwww/AppData/Local/Programs/mingw64/bin/gcc.exe"`（MinGW-w64 16.1.0）；也可回退自带 `CC="<repo>/tools/zig/zig.exe cc"`。两者实测均可用。
 > `run_tests.sh` 的用例数会随 `tests_py/` 增长，以脚本末行 `PASS=n FAIL=m` 为准。
 
 ## 二、相对 2026-10-24 快照已闭环的项
@@ -33,7 +33,7 @@
 2. **gopapy 前端四个已知坑**（详见 `docs/python-parser.md`）：转义半解码、超长整数报错、`except*`、推导式首子句 `async for` —— 已用「源码特征守卫 + 整文件回退」兜住，不影响正确性，只影响那类文件的解析速度。
 3. **GUI 自绘缺失**：无窗口 / 控件 / 绘图库；`打开浏览器()` 是驱动外部 Chromium（chromedp），不是 GUI 框架。
 4. **Linux / macOS 移植未完成**：CFFI 加载路径与浏览器内置依赖 Windows API，CI 目前跑 `windows-latest`。
-5. **`GC统计().live` 是近似值**：口径为「根环境链上的变量数」，不是真正的堆对象可达集合；用于观察长跑程序是否线性增长足够，但不能当作精确 GC 统计。
+5. **`GC统计().live` 是近似值（解释器侧）**：口径为「根环境链上的变量数」，不是真正的堆对象可达集合；用于观察长跑程序是否线性增长足够，但不能当作精确 GC 统计。LLVM AOT 产物侧已是**两代分代 mark-sweep**（第 35 轮：minor/major + 晋升 + epoch 标记），`ZUZO_GC_TRACE=1` 可看每轮回收明细。
 
 ## 四、路线图（按 ROI）
 
@@ -43,6 +43,7 @@
 - [x] **P2** f-string `{x=}` 与嵌套格式说明符
 - [x] **P2** CPython 子进程桥：连接池 / 句柄 LRU / DataFrame 索引 / 模块亲和
 - [x] **P2** 工具链：自带 zig cc / URL 直下 / 发布档位（`--release=O0..Oz`）
+- [x] **P2** LLVM 后端两代分代 GC（第 35 轮：young/old 双链 + 晋升 + epoch 标记 + 双阈值自适应）
 - [ ] **P1** 大整数（消除 int64 溢出，向 CPython 语义靠拢）
 - [ ] **P2** `Environment` 存储收敛（store / slots / valueSlots / slotMap / context 五份状态合并为「槽位唯一 + map 视图」）
 - [ ] **P2** Linux / macOS 移植
@@ -50,4 +51,4 @@
 
 ---
 
-*最后更新：2026-11-07 第34轮 · 依据：当轮六套脚本 + `go test ./...` + 逐条功能实测。*
+*最后更新：2026-11-07 第36轮 · 依据：当轮六套脚本 + `go test ./...` + 逐条功能实测。*

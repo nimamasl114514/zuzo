@@ -129,11 +129,11 @@ define internal void @zf_函数名(ptr sret(%ZVal) %ret, i32 %argc, ptr %argv, p
 4. 访问捕获变量：`env + i*8 → load ZBox* → GEP %ZBox[1]`（即 `ZBox.v`，偏移 24）；
 5. 函数值：`z_closure(@zf_x, env, "显示名")`；具名函数无捕获时 env 传 `null`。
 
-`%ZBox = type { %ZObj, %ZVal }`，`%ZObj = { ptr, i32, i32, i64 }` → `v` 偏移 24，与 C 侧一致（实测 `offsetof=24`）。
+`%ZBox = type { %ZObj, %ZVal }`，`%ZObj = { ptr, i32, i32, i64, i32, i32 }`（第 35 轮加 `gen`/`age` 后 24B → 32B）→ `v` 偏移 32，与 C 侧一致（`offsetof(ZBox, v)=32`）。
 
 ## 六、GC 安全点
 
-运行时是 mark-sweep（见 `gc.md`）。后端在每个可分配语句后发射：
+运行时是**两代分代 mark-sweep**（第 35 轮；young/old 双链 + 年龄晋升，见 `gc.md`）。后端在每个可分配语句后发射：
 
 ```llvm
 %arr = alloca [N x ptr]          ; 当前作用域全部 vPlain 变量的槽位地址
@@ -176,7 +176,7 @@ JSON（解析/序列化）· 文件 I/O（读/写/追加/存在/创建/删除/�
 ## 九、验收
 
 ```bash
-./run_tests_llvm.sh     # 解释器 vs LLVM 产物逐字节对拍（20 用例）
+./run_tests_llvm.sh     # 解释器 vs LLVM 产物逐字节对拍（21 用例）
 cd projects/mini_scheme && ../../zuzo.exe 主程序.hy          # 31/31
 ../../zuzo.exe --emit-exe 主程序.hy -o ../../tmp/mini.exe
 ../../tmp/mini.exe                                          # 31/31

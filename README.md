@@ -33,9 +33,9 @@
 | **内嵌 Python** | 自研 Python 3.14 语法解析器 + [gopapy v2](https://github.com/tamnd/gopapy) 双轨前端；运行时**不依赖 CPython** |
 | **CPython 子进程桥** | `导入 numpy` 后点号直调 `numpy.array([1,2,3]).sum()`；连接池 `ZUZO_PY_POOL=N`、句柄 LRU、`py取值(df, "records+index")` 保留 DataFrame 索引 |
 | **混合语言 `.hypy`** | 单文件 `##ZUZO` / `##PY` 分块，两个运行时按名字双向同步变量 |
-| **LLVM 后端** | `--emit-llvm` 出文本 IR、`--emit-exe` 出原生 exe；与解释器逐字节对拍 |
+| **LLVM 后端** | `--emit-llvm` 出文本 IR、`--emit-exe` 出原生 exe；与解释器逐字节对拍；产物自带**两代分代 GC**（minor/major + 年龄晋升，`ZUZO_GC_TRACE` 可观测） |
 | **工具链** | `zpm` 包管理器（`doctor` / `build` / `build --release[=Oz]`）、自带 `zig cc`（`zuzo toolchain status\|install\|env`，支持本地目录或 URL 直下）、`--check` 类型检查、`--analyze` 拓扑分析、`--shadow` 影子模式 |
-| **测试与可观测** | `zuzo test` 用例运行器、`GC统计()`（live / total / collections / objects）、`ZUZO_CPUPROFILE` CPU 采样 |
+| **测试与可观测** | `zuzo test` 用例运行器、`GC统计()`（live / total / collections / objects）、LLVM 产物 `ZUZO_GC_TRACE` 回收追踪、`ZUZO_CPUPROFILE` CPU 采样 |
 | **内置能力** | HTTP 服务端、浏览器自动化（chromedp）、CFFI / WASM FFI（wazero）、并发原语、正则、编码、集合库、`文本` 命名空间（110 成员） |
 
 > **平台**：当前主要在 **Windows x64** 开发与验证（CFFI 加载路径与浏览器内置依赖 Windows API）；Linux/macOS 移植见 [开发状态](docs/dev-status.md)。
@@ -160,13 +160,13 @@ flowchart TB
 ```bash
 ./run_tests.sh             # Python 语义与 CPython 逐字节对拍（33 用例 + --shadow 双轨）
 ./run_tests_mix.sh         # 混合语言 golden（15 用例）
-./run_tests_llvm.sh        # LLVM 后端对拍（20 用例）
+./run_tests_llvm.sh        # LLVM 后端对拍（21 用例）
 ./run_tests_bridge.sh      # CPython 子进程桥对拍（19 用例）
 ./run_tests_toolchain.sh   # 自带工具链（6 项）
 go test ./...              # Go 单测（9 包）
 ```
 
-当前状态（2026-11-07 实测）：`run_tests` **33/33**；`run_tests_mix` **15/15**；`run_tests_llvm` **20/20**；`run_tests_bridge` **19/19**；`run_tests_toolchain` **6/6**；`projects/mini_scheme` 解释器与 LLVM 产物均 **31/31**；Go 单测 **9 包全绿**（`ast` / `diagnostic` / `evaluator` / `fuzz` / `infer` / `llvmbackend` / `mix` / `pyext` / `tests`）。详细矩阵见 [开发状态](docs/dev-status.md)。
+当前状态（2026-11-07 实测）：`run_tests` **33/33**；`run_tests_mix` **15/15**；`run_tests_llvm` **21/21**；`run_tests_bridge` **19/19**；`run_tests_toolchain` **6/6**；`projects/mini_scheme` 解释器与 LLVM 产物均 **31/31**；Go 单测 **9 包全绿**（`ast` / `diagnostic` / `evaluator` / `fuzz` / `infer` / `llvmbackend` / `mix` / `pyext` / `tests`）。详细矩阵见 [开发状态](docs/dev-status.md)。
 
 ## 文档
 
