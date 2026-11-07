@@ -34,6 +34,7 @@ tests_py/_out/
 tests_py/_tmp/
 tests_py/__pycache__/
 tests_mix/_out/
+tests_llvm/_out/io_test.txt
 tests_c/_out/
 tests_c/_nat/
 **/__pycache__/

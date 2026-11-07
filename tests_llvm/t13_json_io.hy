@@ -8,7 +8,8 @@
 打印(hex编码("AB"), hex解码("4142"))
 打印(url编码("a b&c"), url解码("a+b%26c"))
 
-变量 p = "tmp/c/io_test.txt"
+// 落在 _out（run_tests_llvm.sh 保证存在），不依赖未跟踪的 tmp/ 草稿目录
+变量 p = "tests_llvm/_out/io_test.txt"
 写文件(p, "line1\n")
 追加文件(p, "line2\n")
 打印(文件存在(p), 读文件(p))
