@@ -84,7 +84,8 @@ func (g *Gen) moduleText() string {
 	}
 	b.WriteString("target triple = \"" + triple + "\"\n\n")
 	b.WriteString("%ZVal = type { i32, i64 }\n")
-	b.WriteString("%ZObj = type { ptr, i32, i32, i64 }\n")
+	/* 与 zuzo_rt.h 的 ZObj 严格同步：next/kind/mark/size/gen/age（8+4+4+8+4+4 = 32B） */
+	b.WriteString("%ZObj = type { ptr, i32, i32, i64, i32, i32 }\n")
 	b.WriteString("%ZBox = type { %ZObj, %ZVal }\n")
 	b.WriteString("%ZTryFrame = type { [256 x i8], ptr }\n\n")
 	b.WriteString("@z_try_top = external global ptr\n\n")

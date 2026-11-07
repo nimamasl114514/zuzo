@@ -54,20 +54,38 @@ static void* z_realloc(void* p, size_t n) {
     return q;
 }
 /* ══════════════════════════════════════════════════════════
- * 内存回收：精确根集 mark-sweep（第27轮）
- *   - 对象链：z_obj_new 统一挂链，sweep 一次线性扫描；
- *   - 根集：生成代码在安全点显式传「当前作用域 ZVal 变量地址表 + ZBox* 表 + env」；
- *   - 触发：仅 z_gc_safepoint()，且 live_bytes >= threshold 时；
- *   - 阈值：初始 4MB，回收后 max(4MB, 2 * live)。
+ * 内存回收：两代分代 mark-sweep（第35轮 · 2026-11-07）
+ *   - 代际：年轻代（gen=0）/ 老年代（gen=1），两条独立对象链；
+ *   - 晋升：历经 Z_GC_PROMOTE_AGE 次年轻代回收仍存活 → 移入老年代；
+ *   - minor：只释放年轻代；老年代整体作为隐式根（零写屏障，
+ *            杜绝漏标误回收；代价是标记阶段多扫一遍老年代）；
+ *   - major：整堆标记 + 双链清扫，回收后按存活量重置老年代预算；
+ *   - 标记：epoch 计数（o->mark == z_gc_epoch 即可达），每轮免清零；
+ *   - 根集：生成代码在安全点显式传「当前作用域 ZVal 变量地址表 + ZBox* 表 + env」。
  * ══════════════════════════════════════════════════════════ */
 
-static ZObj*  z_gc_head = NULL;
-static size_t z_gc_live_bytes = 0;
+#define Z_GC_YOUNG_FLOOR   ((size_t)1 << 20)   /* 年轻代初始预算 1 MB */
+#define Z_GC_OLD_FLOOR     ((size_t)8 << 20)   /* 老年代最小预算 8 MB */
+#define Z_GC_PROMOTE_AGE   2                   /* 两次 minor 存活即晋升 */
+
+static ZObj*  z_gc_young = NULL;   /* 年轻代：新对象头插于此 */
+static ZObj*  z_gc_old   = NULL;   /* 老年代：晋升对象头插于此 */
+static size_t z_gc_young_bytes = 0;
+static size_t z_gc_old_bytes = 0;
+static size_t z_gc_live_bytes = 0;   /* young + old，z_gc_stats 的口径 */
 static size_t z_gc_total_bytes = 0;
-static size_t z_gc_threshold = (size_t)4 << 20;
+static size_t z_gc_young_threshold = Z_GC_YOUNG_FLOOR;
+static size_t z_gc_old_threshold = Z_GC_OLD_FLOOR;
+static size_t z_gc_young_floor = Z_GC_YOUNG_FLOOR;   /* 环境变量可抬高的下限 */
+static size_t z_gc_old_floor = Z_GC_OLD_FLOOR;
+static size_t z_gc_promoted_bytes = 0;
+static long   z_gc_minor_count = 0;
+static long   z_gc_major_count = 0;
 static long   z_gc_collections = 0;
 static long   z_gc_objects = 0;
+static uint32_t z_gc_epoch = 0;   /* 0 = 未标记；每轮回收前递增 */
 static int    z_gc_on = 1;
+static int    z_gc_trace = -1;
 
 static ZObj** z_mark_stack = NULL;
 static size_t z_mark_cap = 0;
@@ -75,6 +93,15 @@ static size_t z_mark_len = 0;
 
 static void z_mark_push(ZObj* o);
 static void z_mark_val(ZVal v);
+
+/* 追踪开关：ZUZO_GC_TRACE=1 时每次 minor/major 打一行 stderr */
+static int z_gc_trace_on(void) {
+    if (z_gc_trace < 0) {
+        const char* e = getenv("ZUZO_GC_TRACE");
+        z_gc_trace = (e && e[0] && !(e[0] == '0' && e[1] == '\0')) ? 1 : 0;
+    }
+    return z_gc_trace;
+}
 
 static void* z_obj_new(uint32_t kind, size_t size) {
     ZObj* o = (ZObj*)malloc(size);
@@ -88,11 +115,14 @@ static void* z_obj_new(uint32_t kind, size_t size) {
         size_t k;
         for (k = 0; k < size; k++) p[k] = 0;
     }
-    o->next = z_gc_head;
     o->kind = kind;
     o->mark = 0;
     o->size = size;
-    z_gc_head = o;
+    o->gen = 0;
+    o->age = 0;
+    o->next = z_gc_young;
+    z_gc_young = o;
+    z_gc_young_bytes += size;
     z_gc_live_bytes += size;
     z_gc_total_bytes += size;
     z_gc_objects++;
@@ -100,8 +130,8 @@ static void* z_obj_new(uint32_t kind, size_t size) {
 }
 
 static void z_mark_push(ZObj* o) {
-    if (!o || o->mark) return;
-    o->mark = 1;
+    if (!o || o->mark == z_gc_epoch) return;
+    o->mark = z_gc_epoch;
     if (z_mark_len == z_mark_cap) {
         size_t cap = z_mark_cap ? z_mark_cap * 2 : 256;
         ZObj** s = (ZObj**)realloc(z_mark_stack, cap * sizeof(ZObj*));
@@ -163,63 +193,199 @@ static void z_mark_children(ZObj* o) {
     }
 }
 
-static void z_gc_sweep(void) {
-    ZObj** pp = &z_gc_head;
-    size_t live = 0;
-    while (*pp) {
-        ZObj* o = *pp;
-        if (o->mark) {
-            o->mark = 0;
-            live += o->size;
-            pp = &o->next;
-            continue;
-        }
-        *pp = o->next;
-        if (o->kind == ZOK_STR) free(((ZStr*)o)->data);
-        else if (o->kind == ZOK_ARR) free(((ZArr*)o)->items);
-        else if (o->kind == ZOK_HASH) free(((ZHash*)o)->entries);
-        else if (o->kind == ZOK_ENV) free(((ZEnvHead*)o)->box_off);
-        /* ZOK_FUNC/ZOK_BOX/ZOK_ENV 无附属缓冲 */
-        free(o);
-        z_gc_objects--;
-    }
-    z_gc_live_bytes = live;
-    {
-        size_t floor_bytes = (size_t)4 << 20;
-        size_t next = live * 2;
-        z_gc_threshold = next > floor_bytes ? next : floor_bytes;
-    }
+/* 释放对象本体与附属缓冲 */
+static void z_obj_destroy(ZObj* o) {
+    if (o->kind == ZOK_STR) free(((ZStr*)o)->data);
+    else if (o->kind == ZOK_ARR) free(((ZArr*)o)->items);
+    else if (o->kind == ZOK_HASH) free(((ZHash*)o)->entries);
+    else if (o->kind == ZOK_ENV) free(((ZEnvHead*)o)->box_off);
+    /* ZOK_FUNC/ZOK_BOX 无附属缓冲 */
+    free(o);
 }
 
-static void z_gc_run(int nvals, ZVal** vals, int nboxes, ZBox** boxes, void* env) {
+/* 开始一轮回收：epoch 递增；回绕时清零全对象标记后从 1 再开始 */
+static void z_gc_begin(void) {
+    ZObj* o;
+    z_gc_epoch++;
+    if (z_gc_epoch == 0) {
+        for (o = z_gc_young; o; o = o->next) o->mark = 0;
+        for (o = z_gc_old; o; o = o->next) o->mark = 0;
+        z_gc_epoch = 1;
+    }
     z_mark_len = 0;
-    for (int i = 0; i < nvals; i++) if (vals[i]) z_mark_val(*vals[i]);
-    for (int i = 0; i < nboxes; i++) if (boxes[i]) z_mark_push((ZObj*)boxes[i]);
+}
+
+/* 显式根集：ZVal 变量地址表 + ZBox* 表 + env payload + 跨语句的错误值 */
+static void z_gc_mark_roots(int nvals, ZVal** vals, int nboxes, ZBox** boxes, void* env) {
+    int i;
+    for (i = 0; i < nvals; i++) if (vals[i]) z_mark_val(*vals[i]);
+    for (i = 0; i < nboxes; i++) if (boxes[i]) z_mark_push((ZObj*)boxes[i]);
     if (env) z_mark_push((ZObj*)((ZEnvHead*)env - 1));
     z_mark_val(z_error_value);            /* 执行/遇到 传递中的错误值 */
+}
+
+static void z_gc_drain(void) {
     while (z_mark_len > 0) {
         ZObj* o = z_mark_stack[--z_mark_len];
         z_mark_children(o);
     }
-    z_gc_sweep();
+}
+
+/* 年轻代回收：只释放年轻代；老年代整体当隐式根，保证 old→young 边不丢 */
+static void z_gc_minor(int nvals, ZVal** vals, int nboxes, ZBox** boxes, void* env) {
+    size_t freed = 0, promoted = 0;
+    ZObj* o;
+    ZObj** pp;
+
+    z_gc_begin();
+    for (o = z_gc_old; o; o = o->next) z_mark_push(o);
+    z_gc_mark_roots(nvals, vals, nboxes, boxes, env);
+    z_gc_drain();
+
+    pp = &z_gc_young;
+    while (*pp) {
+        o = *pp;
+        if (o->mark == z_gc_epoch) {
+            o->age++;
+            if (o->age >= Z_GC_PROMOTE_AGE) {
+                *pp = o->next;
+                o->gen = 1;
+                o->next = z_gc_old;
+                z_gc_old = o;
+                z_gc_young_bytes -= o->size;
+                z_gc_old_bytes += o->size;
+                promoted += o->size;
+                continue;
+            }
+            pp = &o->next;
+            continue;
+        }
+        *pp = o->next;
+        z_gc_young_bytes -= o->size;
+        z_gc_live_bytes -= o->size;
+        z_gc_objects--;
+        freed += o->size;
+        z_obj_destroy(o);
+    }
+
+    z_gc_promoted_bytes += promoted;
+    z_gc_minor_count++;
     z_gc_collections++;
+    if (z_gc_trace_on()) {
+        fprintf(stderr,
+                "[gc] minor #%ld freed=%llu promoted=%llu young=%llu old=%llu objects=%ld\n",
+                z_gc_minor_count, (unsigned long long)freed, (unsigned long long)promoted,
+                (unsigned long long)z_gc_young_bytes, (unsigned long long)z_gc_old_bytes,
+                z_gc_objects);
+    }
+}
+
+/* 整堆回收：标记一次，清扫两代；年轻代存活者直接晋升 */
+static void z_gc_major(int nvals, ZVal** vals, int nboxes, ZBox** boxes, void* env) {
+    size_t freed = 0, promoted = 0;
+    size_t next;
+    ZObj* o;
+    ZObj** pp;
+
+    z_gc_begin();
+    z_gc_mark_roots(nvals, vals, nboxes, boxes, env);
+    z_gc_drain();
+
+    pp = &z_gc_young;
+    while (*pp) {
+        o = *pp;
+        if (o->mark == z_gc_epoch) {
+            *pp = o->next;
+            o->gen = 1;
+            o->age = Z_GC_PROMOTE_AGE;
+            o->next = z_gc_old;
+            z_gc_old = o;
+            z_gc_young_bytes -= o->size;
+            z_gc_old_bytes += o->size;
+            promoted += o->size;
+            continue;
+        }
+        *pp = o->next;
+        z_gc_young_bytes -= o->size;
+        z_gc_live_bytes -= o->size;
+        z_gc_objects--;
+        freed += o->size;
+        z_obj_destroy(o);
+    }
+
+    pp = &z_gc_old;
+    while (*pp) {
+        o = *pp;
+        if (o->mark == z_gc_epoch) {
+            pp = &o->next;
+            continue;
+        }
+        *pp = o->next;
+        z_gc_old_bytes -= o->size;
+        z_gc_live_bytes -= o->size;
+        z_gc_objects--;
+        freed += o->size;
+        z_obj_destroy(o);
+    }
+
+    z_gc_promoted_bytes += promoted;
+    z_gc_major_count++;
+    z_gc_collections++;
+
+    /* 自适应：老年代预算 = max(8MB, 回收后存活 × 2)；年轻代回到初始预算 */
+    next = z_gc_old_bytes * 2;
+    z_gc_old_threshold = next > z_gc_old_floor ? next : z_gc_old_floor;
+    z_gc_young_threshold = z_gc_young_floor;
+
+    if (z_gc_trace_on()) {
+        fprintf(stderr,
+                "[gc] major #%ld freed=%llu promoted=%llu young=%llu old=%llu objects=%ld\n",
+                z_gc_major_count, (unsigned long long)freed, (unsigned long long)promoted,
+                (unsigned long long)z_gc_young_bytes, (unsigned long long)z_gc_old_bytes,
+                z_gc_objects);
+    }
 }
 
 void z_gc_init(void) {
     const char* off = getenv("ZUZO_GC");
     if (off && (off[0] == '0' || off[0] == 'o' || off[0] == 'O')) z_gc_on = 0;
+
+    /* 调参钩子（压测/归因用）：字节数，0 或非法值忽略。
+       ZUZO_GC_YOUNG 覆盖年轻代预算，ZUZO_GC_OLD 覆盖老年代预算。 */
+    {
+        const char* y = getenv("ZUZO_GC_YOUNG");
+        if (y && y[0]) {
+            long v = atol(y);
+            if (v > 0) { z_gc_young_floor = (size_t)v; z_gc_young_threshold = (size_t)v; }
+        }
+        const char* d = getenv("ZUZO_GC_OLD");
+        if (d && d[0]) {
+            long v = atol(d);
+            if (v > 0) { z_gc_old_floor = (size_t)v; z_gc_old_threshold = (size_t)v; }
+        }
+    }
 }
 
 void z_gc_set_enabled(int on) { z_gc_on = on ? 1 : 0; }
 int  z_gc_enabled(void) { return z_gc_on; }
 
 void z_gc_set_threshold(size_t bytes) {
-    z_gc_threshold = bytes ? bytes : ((size_t)4 << 20);
+    z_gc_young_threshold = bytes ? bytes : Z_GC_YOUNG_FLOOR;
 }
 
 void z_gc_collect_now(void) {
-    /* 无根集的强制回收（仅测试夹具/泄漏判定用；生产路径只走 safepoint） */
-    z_gc_run(0, NULL, 0, NULL, NULL);
+    /* 无根集强制清空两代（仅测试夹具/泄漏判定用；生产路径只走 safepoint） */
+    ZObj* o;
+    ZObj* n;
+    for (o = z_gc_young; o; o = n) { n = o->next; z_obj_destroy(o); }
+    for (o = z_gc_old; o; o = n) { n = o->next; z_obj_destroy(o); }
+    z_gc_young = NULL;
+    z_gc_old = NULL;
+    z_gc_young_bytes = 0;
+    z_gc_old_bytes = 0;
+    z_gc_live_bytes = 0;
+    z_gc_objects = 0;
+    z_gc_collections++;
 }
 
 void z_gc_stats(size_t* live_bytes, size_t* total_bytes, long* collections, long* objects) {
@@ -229,10 +395,26 @@ void z_gc_stats(size_t* live_bytes, size_t* total_bytes, long* collections, long
     if (objects) *objects = z_gc_objects;
 }
 
+void z_gc_gen_stats(size_t* young_bytes, size_t* old_bytes,
+                    size_t* young_threshold, size_t* old_threshold,
+                    long* minor_count, long* major_count, size_t* promoted_bytes) {
+    if (young_bytes) *young_bytes = z_gc_young_bytes;
+    if (old_bytes) *old_bytes = z_gc_old_bytes;
+    if (young_threshold) *young_threshold = z_gc_young_threshold;
+    if (old_threshold) *old_threshold = z_gc_old_threshold;
+    if (minor_count) *minor_count = z_gc_minor_count;
+    if (major_count) *major_count = z_gc_major_count;
+    if (promoted_bytes) *promoted_bytes = z_gc_promoted_bytes;
+}
+
 void z_gc_safepoint(int nvals, ZVal** vals, int nboxes, ZBox** boxes, void* env) {
     if (!z_gc_on) return;
-    if (z_gc_live_bytes < z_gc_threshold) return;
-    z_gc_run(nvals, vals, nboxes, boxes, env);
+    if (z_gc_young_bytes >= z_gc_young_threshold) {
+        z_gc_minor(nvals, vals, nboxes, boxes, env);
+    }
+    if (z_gc_old_bytes >= z_gc_old_threshold) {
+        z_gc_major(nvals, vals, nboxes, boxes, env);
+    }
 }
 
 /* UTF-8 码点计数（长度() 对字符串的口径：rune 数，不是字节数） */

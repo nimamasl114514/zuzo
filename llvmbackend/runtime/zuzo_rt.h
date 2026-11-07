@@ -46,10 +46,12 @@ typedef enum {
 } ZObjKind;
 
 typedef struct ZObj {
-    struct ZObj* next; /* 全局对象链 */
+    struct ZObj* next; /* 同代对象链：年轻代/老年代各自一条 */
     uint32_t     kind; /* ZObjKind */
-    uint32_t     mark; /* 标记位 */
+    uint32_t     mark; /* 标记 epoch：等于当前 GC epoch 即本轮可达 */
     size_t       size; /* 申请字节数 */
+    uint32_t     gen;  /* 代：0 = 年轻代，1 = 老年代 */
+    uint32_t     age;  /* 历经的年轻代回收次数（达到阈值即晋升） */
 } ZObj;
 
 /* env 头：偏移表在创建时拷贝一份，随 env 对象一起释放。
@@ -186,10 +188,13 @@ ZVal  z_call(ZVal f, int argc, ZVal* argv);
 /* ── 运行时初始化（Windows 下 stdout 置二进制模式，对齐解释器 LF）── */
 void z_rt_init(void);
 
-/* -- 内存回收（第27轮 · mark-sweep GC）--------------------------------
+/* -- 内存回收（第35轮 · 两代分代 mark-sweep GC）------------------------
  * 语义契约：只回收从根集不可达的堆对象；可达对象永不回收。
+ * 分代契约：新对象进年轻代；历经 Z_GC_PROMOTE_AGE 次 minor 存活即晋升老年代。
+ *           minor 只释放年轻代（老年代整体作为隐式根）；major 整堆回收。
  * 安全点契约：只在 z_gc_safepoint() 内可能回收。
  * 关闭方式：环境变量 ZUZO_GC=off 或 z_gc_set_enabled(0)。
+ * 观测：环境变量 ZUZO_GC_TRACE=1 时向 stderr 打印每次 minor/major。
  */
 void z_gc_init(void);
 void z_gc_set_enabled(int on);
@@ -197,6 +202,10 @@ int  z_gc_enabled(void);
 void z_gc_set_threshold(size_t bytes);
 void z_gc_collect_now(void);
 void z_gc_stats(size_t* live_bytes, size_t* total_bytes, long* collections, long* objects);
+/* 分代视图：各代字节数 / 阈值 / 回收次数 / 累计晋升字节（任一参数可为 NULL） */
+void z_gc_gen_stats(size_t* young_bytes, size_t* old_bytes,
+                    size_t* young_threshold, size_t* old_threshold,
+                    long* minor_count, long* major_count, size_t* promoted_bytes);
 /* 安全点：vals = 当前作用域 ZVal 变量地址表；boxes = 当前作用域 ZBox* 变量；env = 本帧 env payload（无则 NULL） */
 void z_gc_safepoint(int nvals, ZVal** vals, int nboxes, ZBox** boxes, void* env);
 
